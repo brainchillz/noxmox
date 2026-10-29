@@ -133,9 +133,12 @@ on their own.
   exclusive within two seconds. Pools without a mailbox (v1) use a sanlock
   host event instead, which costs one delta lease renewal.
 - A dead host's leases expire through sanlock's delta lease; measured 125 s
-  from hard reset to the survivor acquiring on this hardware (io_timeout 10).
-  A node whose sanlock stops renewing is reset by wdmd and softdog 123 s
-  after the last renewal, before any peer can take its leases.
+  from hard reset to the survivor acquiring on this hardware (io_timeout 10)
+  when the host stays down. A host that reboots and rejoins sooner gets a
+  new lockspace generation, and sanlock frees the leases of its previous
+  life at once: the chaos suite measured 56 s with a 55 s reboot. A node
+  whose sanlock stops renewing is reset by wdmd and softdog 123 s after
+  the last renewal, before any peer can take its leases.
 - Fencing is wdmd on a kernel watchdog device. On the lab's HP EliteDesk
   800 G6 the iTCO timer loads but never resets the machine (tested by
   opening it and not petting it for four minutes), so wdmd uses softdog
