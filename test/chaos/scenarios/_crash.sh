@@ -23,7 +23,7 @@ crash_scenario() {
     $kill_fn "$hip"
     # background monitor: when does the holder vanish?
     local mon; mon=$(mktemp)
-    ( while host_up "$hip"; do sleep 1; done; echo $(( $(date +%s) - t0 )) > "$mon" ) &
+    ( while host_up "$hip"; do sleep 1; [ $(( $(date +%s) - t0 )) -gt 400 ] && exit 0; done; echo $(( $(date +%s) - t0 )) > "$mon" ) &
     local monpid=$!
 
     # the survivor tries to take the verifier volume; this only succeeds once
@@ -39,6 +39,14 @@ crash_scenario() {
     if [ "$reset_secs" = none ]; then verdict=FAIL; reason+="holder-never-reset "; 
     elif [ "$reset_secs" -gt "$reset_max" ]; then verdict=FAIL; reason+="reset-too-slow "; fi
     if [ "$reset_secs" != none ] && [ "$acquire_secs" -lt "$reset_secs" ]; then verdict=FAIL; reason+="acquired-before-fence "; fi
+    if [ "$reset_secs" = none ] && ssh_up "$hip"; then
+        # The holder did not fence itself: its guest may still have the
+        # disks open. Kill it before anything restores the holder's path,
+        # or two copies of the guest write the same disk.
+        log "holder still up: killing its copy of the guest before any cleanup"
+        s "$hip" "pkill -9 -f '^/usr/bin/kvm -id $VMID '; sleep 2; for d in \$(dmsetup ls | awk '/^nox-vm-$VMID-/ {print \$1}'); do dmsetup remove --retry \$d; done; echo cleaned" 60
+        [ -n "${UNDO_FN:-}" ] && $UNDO_FN "$hip"
+    fi
 
     # bring the guest up on the survivor
     recover_quorum "$tip"

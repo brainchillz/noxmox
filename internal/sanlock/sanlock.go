@@ -162,6 +162,14 @@ func RestrictSigkill(sock int) error {
 	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_SIGKILL))
 }
 
+// RestrictAll forbids sanlock from signalling this process at all. When
+// the host can no longer renew its lease, sanlock then cannot clear the
+// lease holder and must let the watchdog reset the host, which is the only
+// thing that also stops the guests using the volumes.
+func RestrictAll(sock int) error {
+	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_ALL))
+}
+
 // WriteLockspace initializes the delta-lease area on disk. maxHosts 0 means
 // the sanlock default (2000 for 512-byte sectors).
 func WriteLockspace(l Lockspace, maxHosts int, ioTimeout int) error {
