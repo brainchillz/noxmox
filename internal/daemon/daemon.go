@@ -511,12 +511,15 @@ func (d *Daemon) reaper() {
 // erroring while a fresh open of the same path works. When the device is
 // back but our fd is stale, exit so systemd restarts us with a fresh open;
 // leases persist as orphans and are re-adopted, invisible to running
-// guests. If a fresh open also fails the device is genuinely gone (an
-// outage or a fence in progress), so stay put and let that path handle it.
+// guests. The restart also gives sanlock a fresh host generation, which is
+// what lets a later exclusive acquire reclaim any shared lease left on disk
+// by a dead generation (the abnormally-aborted-migration case). If a fresh
+// open also fails the device is genuinely gone (an outage or a fence in
+// progress), so stay put and let that path handle it.
 func (d *Daemon) healthcheck() {
 	fails := 0
 	for {
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second)
 		if _, err := d.pool.Dev.ReadAt(0, store.SBSize); err == nil {
 			fails = 0
 			continue
@@ -1503,33 +1506,6 @@ func (d *Daemon) repair(resp proto.Response) error {
 				actions = append(actions, fmt.Sprintf("%s: removed stale device with no record", n))
 			} else {
 				actions = append(actions, fmt.Sprintf("%s: stale device still open, left alone", n))
-			}
-		}
-		// Stale shared orphan leases: an abnormally aborted migration (the
-		// source fenced mid-handoff) can leave a volume's lease held shared
-		// as a sanlock orphan with no device and no guest here, which blocks
-		// a later exclusive activation forever. If this host holds such a
-		// lease for an active volume it has no device for and is not holding
-		// in its own map, release the orphan. ReleaseOrphan only affects this
-		// host's own orphan on the resource, so it is a no-op otherwise.
-		for _, v := range t.Active() {
-			if _, ok := d.held[v.Name]; ok || store.DMExists(v.Name) {
-				continue
-			}
-			owners, shared, oerr := sanlock.Owners(d.res(v.Slot))
-			if oerr != nil {
-				continue
-			}
-			mine := false
-			for _, o := range owners {
-				if o.HostID == d.cfg.HostID {
-					mine = true
-				}
-			}
-			if mine {
-				if err := sanlock.ReleaseOrphan(d.res(v.Slot)); err == nil {
-					actions = append(actions, fmt.Sprintf("%s: released stale %s orphan lease (slot %d, no device here)", v.Name, map[bool]string{true: "shared", false: "exclusive"}[shared], v.Slot))
-				}
 			}
 		}
 		fixed, err := d.pool.RepairCopies()

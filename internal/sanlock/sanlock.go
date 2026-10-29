@@ -292,8 +292,10 @@ func Release(sock int, r Resource) error {
 }
 
 // ReleaseOrphan drops an orphan lease that no process holds.
-func ReleaseOrphan(r Resource) error {
-	res := r.c(Exclusive, false)
+func ReleaseOrphan(r Resource, mode int) error {
+	// The resource flags must match the orphan being released: a shared
+	// orphan is not found by a release built with exclusive flags.
+	res := r.c(mode, false)
 	defer C.free(unsafe.Pointer(res))
 	return wrap("release_orphan", C.nox_release(-1, -1, C.SANLK_REL_ORPHAN, res))
 }
