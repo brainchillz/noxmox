@@ -186,7 +186,7 @@ func (d *Daemon) withMbox(fn func() error) error {
 func (d *Daemon) post(host uint64, op uint32, arg uint64) error {
 	d.mailSeq++
 	now := time.Now().Unix()
-	e := store.MailEntry{Sender: uint32(d.cfg.HostID), Op: op, Arg: arg, Seq: d.mailSeq, Deadline: now + 60}
+	e := store.MailEntry{Sender: uint32(d.cfg.HostID), Op: op, Arg: arg, Seq: d.mailSeq, Posted: now}
 	return d.withMbox(func() error { return d.pool.PostMail(host, e, now) })
 }
 
@@ -231,14 +231,11 @@ func (d *Daemon) mailbox() {
 		}
 		now := time.Now()
 		for k, t := range d.mailSeen {
-			if now.Sub(t) > 5*time.Minute {
+			if now.Sub(t) > 2*time.Hour {
 				delete(d.mailSeen, k)
 			}
 		}
 		for _, e := range es {
-			if e.Deadline <= now.Unix() {
-				continue
-			}
 			k := [2]uint64{uint64(e.Sender), e.Seq}
 			if _, dup := d.mailSeen[k]; dup {
 				continue

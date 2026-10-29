@@ -125,29 +125,30 @@ func TestMailbox(t *testing.T) {
 		t.Fatalf("fresh mailbox: %v %d %v", es, seq, err)
 	}
 	now := int64(1000)
-	if err := p.PostMail(2, MailEntry{Sender: 1, Op: MailConvertShared, Arg: 5, Seq: 1, Deadline: now + 60}, now); err != nil {
+	if err := p.PostMail(2, MailEntry{Sender: 1, Op: MailConvertShared, Arg: 5, Seq: 1, Posted: now}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.PostMail(2, MailEntry{Sender: 3, Op: MailConvertSharedGuest, Arg: 900, Seq: 9, Deadline: now + 30}, now); err != nil {
+	// a sender whose clock is minutes off is fine either way
+	if err := p.PostMail(2, MailEntry{Sender: 3, Op: MailConvertSharedGuest, Arg: 900, Seq: 9, Posted: now - 600}, now); err != nil {
 		t.Fatal(err)
 	}
 	// repeat from sender 1 replaces, does not duplicate
-	if err := p.PostMail(2, MailEntry{Sender: 1, Op: MailConvertShared, Arg: 5, Seq: 2, Deadline: now + 90}, now); err != nil {
+	if err := p.PostMail(2, MailEntry{Sender: 1, Op: MailConvertShared, Arg: 5, Seq: 2, Posted: now + 300}, now); err != nil {
 		t.Fatal(err)
 	}
 	es, seq, err = p.ReadMailbox(2)
 	if err != nil || len(es) != 2 || seq != 3 {
 		t.Fatalf("after posts: %v seq %d err %v", es, seq, err)
 	}
-	// expired entries vanish on the next write
-	if err := p.PostMail(2, MailEntry{Sender: 4, Op: MailConvertShared, Arg: 1, Seq: 1, Deadline: now + 200}, now+100); err != nil {
+	// leftovers older than an hour vanish on the next write
+	if err := p.PostMail(2, MailEntry{Sender: 4, Op: MailConvertShared, Arg: 1, Seq: 1, Posted: now + 2*MailMaxAge}, now+2*MailMaxAge); err != nil {
 		t.Fatal(err)
 	}
 	es, _, _ = p.ReadMailbox(2)
 	if len(es) != 1 || es[0].Sender != 4 {
 		t.Fatalf("expiry: %v", es)
 	}
-	if err := p.ClearMail(2, 4, now+100); err != nil {
+	if err := p.ClearMail(2, 4, now+2*MailMaxAge); err != nil {
 		t.Fatal(err)
 	}
 	if es, _, _ = p.ReadMailbox(2); len(es) != 0 {
@@ -162,7 +163,7 @@ func TestMailbox(t *testing.T) {
 	}
 	// fill to capacity: the oldest deadlines are dropped, never an error
 	for i := 0; i < MailboxCap+10; i++ {
-		if err := p.PostMail(1, MailEntry{Sender: uint32(10 + i), Op: 1, Arg: uint64(i), Deadline: now + int64(i)}, now); err != nil {
+		if err := p.PostMail(1, MailEntry{Sender: uint32(10 + i), Op: 1, Arg: uint64(i), Posted: now + int64(i)}, now); err != nil {
 			t.Fatal(err)
 		}
 	}

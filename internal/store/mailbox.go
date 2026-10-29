@@ -30,13 +30,23 @@ const (
 )
 
 // MailEntry is one request to the block's owner.
+//
+// Hosts' clocks are not trusted: the receiver acts on every (Sender, Seq)
+// it has not handled yet, and a sender withdraws its own requests once it
+// is done with them. Posted is the sender's wall clock and is only used to
+// discard entries that are absurdly old or far in the future (an hour), so
+// a dead sender's leftovers eventually disappear.
 type MailEntry struct {
-	Sender   uint32
-	Op       uint32
-	Arg      uint64
-	Seq      uint64 // sender's own counter, so a repeat can be told from a new request
-	Deadline int64  // unix seconds after which the request is void
+	Sender uint32
+	Op     uint32
+	Arg    uint64
+	Seq    uint64 // sender's own counter, so a repeat can be told from a new request
+	Posted int64  // unix seconds on the sender's clock
 }
+
+// MailMaxAge bounds how far an entry's Posted may differ from a reader's
+// clock before it is dropped as a leftover.
+const MailMaxAge = 3600
 
 func encodeMailbox(host uint64, seq uint64, es []MailEntry) ([]byte, error) {
 	if len(es) > MailboxCap {
@@ -54,7 +64,7 @@ func encodeMailbox(host uint64, seq uint64, es []MailEntry) ([]byte, error) {
 		le.PutUint32(b[off+4:], e.Op)
 		le.PutUint64(b[off+8:], e.Arg)
 		le.PutUint64(b[off+16:], e.Seq)
-		le.PutUint64(b[off+24:], uint64(e.Deadline))
+		le.PutUint64(b[off+24:], uint64(e.Posted))
 		off += mailEntry
 	}
 	le.PutUint32(b[MailboxBlock-4:], crc32.Checksum(b[:MailboxBlock-4], castagnoli))
@@ -130,10 +140,15 @@ func (p *Pool) writeMailbox(host uint64, seq uint64, es []MailEntry) error {
 	return p.Dev.WriteAt(p.Super.MailboxBlockOff(host), b)
 }
 
+func stale(x MailEntry, now int64) bool {
+	return x.Posted < now-MailMaxAge || x.Posted > now+MailMaxAge
+}
+
 // PostMail adds a request to host's block. The caller holds the mailbox
-// lease. Expired entries are dropped, and an older request from the same
-// sender for the same op and argument is replaced. A corrupt block is
-// replaced rather than preserved: its owner would ignore it anyway.
+// lease. Leftovers older than MailMaxAge are dropped, and an older request
+// from the same sender for the same op and argument is replaced. A corrupt
+// block is replaced rather than preserved: its owner would ignore it
+// anyway. When the block is full the oldest entries make room.
 func (p *Pool) PostMail(host uint64, e MailEntry, now int64) error {
 	if err := p.mailCheck(host); err != nil {
 		return err
@@ -145,7 +160,7 @@ func (p *Pool) PostMail(host uint64, e MailEntry, now int64) error {
 	es, seq, _ := decodeMailbox(b, host)
 	kept := es[:0]
 	for _, x := range es {
-		if x.Deadline <= now {
+		if stale(x, now) {
 			continue
 		}
 		if x.Sender == e.Sender && x.Op == e.Op && x.Arg == e.Arg {
@@ -154,9 +169,9 @@ func (p *Pool) PostMail(host uint64, e MailEntry, now int64) error {
 		kept = append(kept, x)
 	}
 	kept = append(kept, e)
-	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Deadline < kept[j].Deadline })
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Posted < kept[j].Posted })
 	if len(kept) > MailboxCap {
-		kept = kept[len(kept)-MailboxCap:] // keep the freshest
+		kept = kept[len(kept)-MailboxCap:]
 	}
 	return p.writeMailbox(host, seq+1, kept)
 }
@@ -177,7 +192,7 @@ func (p *Pool) ClearMail(host uint64, sender uint32, now int64) error {
 	}
 	kept := es[:0]
 	for _, x := range es {
-		if x.Sender != sender && x.Deadline > now {
+		if x.Sender != sender && !stale(x, now) {
 			kept = append(kept, x)
 		}
 	}
