@@ -38,6 +38,22 @@ install -m 0755 /tmp/nox /usr/sbin/nox
 install -m 0644 "/tmp/noxd@.service" /etc/systemd/system/noxd@.service
 install -d -m 0755 /etc/nox
 printf 'NOX_DEVICE=%s\nNOX_HOST_ID=%s\n' "$DEVICE" "$HOST_ID" > "/etc/nox/$POOL.conf"
+
+# Timeouts that must agree (see README). A failed iSCSI path has to return an
+# I/O error before sanlock gives up on the host, or the node fences itself
+# for a brief blip, and the storage-loss fence wants the guest's wedged I/O
+# to error out quickly so it can be reaped before the watchdog. So cap the
+# iSCSI replacement timeout well under sanlock's 8 x io_timeout (80 s at the
+# default io_timeout 10). Override with NOX_REPLACEMENT_TIMEOUT; this applies
+# to all iSCSI sessions on the node.
+RT="${NOX_REPLACEMENT_TIMEOUT:-15}"
+if [ -f /etc/iscsi/iscsid.conf ]; then
+    sed -i "s/^node.session.timeo.replacement_timeout = .*/node.session.timeo.replacement_timeout = $RT/" /etc/iscsi/iscsid.conf
+    for rec in /etc/iscsi/nodes/*/*/default; do
+        [ -f "$rec" ] && iscsiadm -m node -o update -n node.session.timeo.replacement_timeout -v "$RT" >/dev/null 2>&1 || true
+    done
+    echo "set iSCSI replacement_timeout=$RT (re-login or reboot for live sessions to adopt it)"
+fi
 perl -I/usr/share/perl5 -c /tmp/NoxPlugin.pm >/dev/null
 install -m 0644 /tmp/NoxPlugin.pm /usr/share/perl5/PVE/Storage/Custom/NoxPlugin.pm
 
