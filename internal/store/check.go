@@ -71,8 +71,11 @@ func checkRaw(s *Super, raw []byte) []Problem {
 		case okB:
 			w = b
 		default:
-			// A never-written slot is all zeros: fine. Anything else is damage.
-			if !allZero(raw[base : base+2*RecSize]) {
+			// A never-written slot is all zeros. One unreadable copy next to
+			// a zero copy is a torn first write and the slot is still free.
+			// Two unreadable non-zero copies cannot come from sequential
+			// writes and mean damage.
+			if !allZero(raw[base:base+RecSize]) && !allZero(raw[base+RecSize:base+2*RecSize]) {
 				add(int(slot), "no valid copy")
 			}
 			continue

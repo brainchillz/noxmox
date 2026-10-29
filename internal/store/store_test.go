@@ -108,3 +108,58 @@ func TestFormatAndTable(t *testing.T) {
 		t.Fatal("v3 missing after grow")
 	}
 }
+
+// TestSuperMirror: a damaged primary superblock must not make the pool
+// unreadable while the mirror is intact, and vice versa.
+func TestSuperMirror(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lun.img")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 30); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	dev, err := OpenDevice(path)
+	if err != nil {
+		t.Skipf("O_DIRECT not supported here: %v", err)
+	}
+	defer dev.Close()
+	p, err := Format(dev, 16*MiB, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuid := p.Super.UUIDString()
+	junk := make([]byte, SBSize)
+	for i := range junk {
+		junk[i] = byte(i)
+	}
+	if err := dev.WriteAt(0, junk); err != nil {
+		t.Fatal(err)
+	}
+	q, err := Open(dev)
+	if err != nil {
+		t.Fatalf("open with damaged primary: %v", err)
+	}
+	if q.Super.UUIDString() != uuid {
+		t.Fatal("mirror returned a different pool")
+	}
+	// repair the primary from the mirror, then damage the mirror
+	if err := dev.WriteAt(0, q.Super.encode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := dev.WriteAt(dev.Size-SBSize, junk); err != nil {
+		t.Fatal(err)
+	}
+	if q, err = Open(dev); err != nil || q.Super.UUIDString() != uuid {
+		t.Fatalf("open with damaged mirror: %v", err)
+	}
+	if err := dev.WriteAt(0, junk); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dev); err == nil {
+		t.Fatal("opened a pool with both superblocks damaged")
+	}
+}

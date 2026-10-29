@@ -14,6 +14,9 @@ type Device struct {
 	f    *os.File
 	Path string
 	Size uint64
+	// Record, when set, sees every completed write in order. The crash
+	// replay suite uses it where dm-log-writes is unavailable.
+	Record func(off uint64, data []byte)
 }
 
 // OpenDevice opens the LUN for direct I/O.
@@ -79,7 +82,13 @@ func (d *Device) WriteAt(off uint64, b []byte) error {
 		}
 		done += k
 	}
-	return syscall.Fdatasync(int(d.f.Fd()))
+	if err := syscall.Fdatasync(int(d.f.Fd())); err != nil {
+		return err
+	}
+	if d.Record != nil {
+		d.Record(off, append([]byte(nil), b...))
+	}
+	return nil
 }
 
 // Zero writes zeros over [off, off+n).
