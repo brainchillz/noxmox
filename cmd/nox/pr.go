@@ -33,7 +33,7 @@ func runPRProbe(device string, hostID uint64) int {
 		fmt.Printf("PR: register failed: %v\n", err)
 		return 1
 	}
-	fmt.Printf("PR: registered key %#x\n", key)
+	fmt.Printf("PR: registered key %#x (APTPL=%v)\n", key, d.APTPL())
 	keys, err := d.Keys()
 	if err != nil {
 		fmt.Printf("PR: read keys after register failed: %v\n", err)
@@ -57,6 +57,66 @@ func runPRProbe(device string, hostID uint64) int {
 	if !found {
 		fmt.Println("PR: WARNING our key did not read back - the target may be faking PR; treat as unsupported")
 		return 1
+	}
+	return 0
+}
+
+// runPR is a small PR ops command for validation and oper: register,
+// reserve, preempt, keys, clear. Standalone, no daemon.
+func runPR(op, device string, hostID, victim uint64) int {
+	if device == "" {
+		fmt.Fprintln(os.Stderr, "pr: --device required")
+		return 2
+	}
+	d, err := scsipr.Open(device)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pr: open: %v\n", err)
+		return 2
+	}
+	defer d.Close()
+	key := scsipr.KeyForHost(hostID)
+	switch op {
+	case "register":
+		if err := d.Register(key); err != nil {
+			fmt.Fprintf(os.Stderr, "pr register: %v\n", err)
+			return 1
+		}
+		fmt.Printf("registered %#x\n", key)
+	case "reserve":
+		if err := d.Register(key); err != nil {
+			fmt.Fprintf(os.Stderr, "pr reserve (register): %v\n", err)
+			return 1
+		}
+		if err := d.Reserve(key); err != nil {
+			fmt.Fprintf(os.Stderr, "pr reserve: %v\n", err)
+			return 1
+		}
+		fmt.Printf("registered %#x and reserved\n", key)
+	case "preempt":
+		vk := scsipr.KeyForHost(victim)
+		if err := d.Preempt(key, vk); err != nil {
+			fmt.Fprintf(os.Stderr, "pr preempt: %v\n", err)
+			return 1
+		}
+		fmt.Printf("preempted %#x (host %d)\n", vk, victim)
+	case "keys":
+		keys, err := d.Keys()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pr keys: %v\n", err)
+			return 1
+		}
+		for _, k := range keys {
+			fmt.Printf("%#x\n", k)
+		}
+	case "clear":
+		keys, _ := d.Keys()
+		for _, k := range keys {
+			_ = d.Unregister(k)
+		}
+		fmt.Println("cleared")
+	default:
+		fmt.Fprintf(os.Stderr, "pr: unknown op %q\n", op)
+		return 2
 	}
 	return 0
 }

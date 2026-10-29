@@ -102,6 +102,18 @@ func main() {
 		_ = fp.Parse(args)
 		os.Exit(runPRProbe(*fdev, *fhid))
 	}
+	if cmd == "pr" {
+		fp := flag.NewFlagSet("pr", flag.ExitOnError)
+		fdev := fp.String("device", "", "block device")
+		fhid := fp.Uint64("host-id", 1, "this host's sanlock host id")
+		fvic := fp.Uint64("victim", 0, "preempt: victim host id")
+		_ = fp.Parse(args)
+		sub := ""
+		if fp.NArg() > 0 {
+			sub = fp.Arg(0)
+		}
+		os.Exit(runPR(sub, *fdev, *fhid, *fvic))
+	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	device := fs.String("device", "", "shared block device")
 	pool := fs.String("pool", proto.DefaultPool, "pool name (selects the socket and the dm name prefix)")
