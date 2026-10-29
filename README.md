@@ -82,7 +82,7 @@ integration beyond what sanlock and wdmd give you, and the Incus driver.
 
 | Path | What |
 |---|---|
-| `cmd/nox` | single binary: `nox daemon` (noxd) and the CLI |
+| `cmd/nox` | single binary: `nox daemon` (noxd), the CLI, and `nox fence` (the killpath) |
 | `internal/store` | on-disk format v1 and v2, O_DIRECT device I/O, allocator, mailbox, checker, dm tables |
 | `internal/sanlock` | cgo binding over libsanlock (leases, orphans, host events) |
 | `internal/daemon` | noxd: lockspace join, lease holding, chain activation, migration handoff, socket API |
@@ -142,20 +142,18 @@ on their own.
   resets it 123 s after the last renewal, before any peer acquires. Both
   are verified in the chaos suite.
 
-**Known gap: losing only the storage path, with sanlock still running, is
-not yet fenced reliably.** sanlock fences a host by killing the processes
-that hold its leases and, only if they will not die, letting the watchdog
-reset the host. noxd holds the leases, but the data path is the guests'
-QEMU processes. When a node loses its path to the LUN while sanlock keeps
-running, sanlock kills noxd, sees no lease holders left, and can disarm the
-watchdog without resetting the host, while the guest still has its disk
-mapped. If that LUN later comes back to the old node after a survivor took
-over, both could write it. The chaos suite caught this: some path-loss runs
-fenced (noxd was stuck in uninterruptible I/O and could not be reaped),
-one did not. The fix is a sanlock killpath that stops the guests when a
-lease is lost, the same mechanism libvirt uses; it is designed, not built.
-Until then, treat path-loss fencing on a live node as best-effort and give
-the nodes a hardware watchdog with a short, independent timeout.
+- Losing only the storage path, while sanlock keeps running, is fenced
+  through a sanlock killpath, the same mechanism libvirt uses. noxd holds
+  the leases, but the data path is the guests' QEMU, so killing noxd alone
+  would let sanlock call the host clean while a guest kept writing. Instead,
+  when sanlock loses the lockspace it runs `nox fence`, which SIGKILLs every
+  local process holding one of the pool's volumes and then stops noxd. While
+  a guest still holds a volume the fence leaves noxd alive and the watchdog
+  armed, so a guest that is wedged in dead-storage I/O and cannot be reaped
+  takes the whole host down by watchdog instead. Either way the guest is
+  gone before a survivor acquires. The chaos suite exercises both outcomes.
+  A shorter iSCSI `replacement_timeout` makes the gentle path (guest killed,
+  host stays up) win over the watchdog reset more often.
 - Fencing is wdmd on a kernel watchdog device. On the lab's HP EliteDesk
   800 G6 the iTCO timer loads but never resets the machine (tested by
   opening it and not petting it for four minutes), so wdmd uses softdog
@@ -228,9 +226,12 @@ A second pool is a second config file and a second storage with
     nox activate NAME [--shared] [--timeout SEC] | deactivate NAME
     nox format --device DEV [--extent-size 256M] [--slots 1024] [--io-timeout 10]
     nox upgrade                  # format v1 to v2, with every volume inactive
+    nox set-io-timeout SEC       # rewrite the lockspace timeout, other daemons stopped
     nox version
 
-Every command takes `--pool NAME` (default `nox`).
+Every command takes `--pool NAME` (default `nox`). `nox fence --pool NAME`
+exists too but is the daemon's sanlock killpath, not something you run by
+hand; `nox fence --pool NAME --dry-run` reports what it would stop.
 
 ## Known limits
 
