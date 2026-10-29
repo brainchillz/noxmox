@@ -1,10 +1,54 @@
-# nox: a VMFS-style shared-LUN block pool for Proxmox VE
+# nox
 
-Status: working prototype (2026-10-28). One iSCSI or FC LUN, every node in the
-cluster opens it read-write, VM disks are device-mapper volumes over fixed
-extents, and sanlock leases on the LUN itself decide who may write. No
-clustered filesystem, no kernel module, no DLM, no corosync dependency.
-Design notes are kept outside the repository.
+**Shared iSCSI storage for Proxmox that works the way you expected it to.**
+
+Ever pointed a Proxmox cluster at an iSCSI LUN and found it tedious to manage?
+You get LVM on top of the LUN, no snapshots, no thin provisioning, and a nagging
+feeling that nothing is actually stopping two nodes from writing to the same
+disk at once. The alternatives are a clustered filesystem with its own DLM and
+fencing stack to babysit, or giving up and buying NFS.
+
+If you came from VMware, you remember it being easier. One LUN, every host sees
+it, VMs live on it, vMotion just works. That is VMFS, and Linux never had an
+equivalent.
+
+nox is that equivalent. Format one iSCSI or Fibre Channel LUN once, every node
+in the cluster opens it read-write, and each VM disk becomes a plain block
+device over fixed extents on the LUN. Ownership is decided by sanlock leases
+stored on the LUN itself, so a node that stops renewing gets fenced and its
+disks become available to the survivors, with no corosync, DLM, kernel module,
+or clustered filesystem involved. Proxmox sees it as an ordinary shared storage
+type: create, resize, clone, and live migrate from the UI.
+
+## What it does today
+
+Status: working prototype, tested on a two-node Proxmox VE 9.2 cluster against
+a 1 TB iSCSI LUN.
+
+- Volumes are device-mapper linear maps over 256 MiB extents. Activation takes
+  under 150 ms. Resize is online and instant.
+- Live migration through the Proxmox UI works in both directions. Measured
+  downtime 6 to 44 ms.
+- A second node that tries to start the same VM is refused in under a second
+  and told which host holds the disk.
+- Hard-reset a node mid-write and the survivor can take its disks about two
+  minutes later. A node whose lease renewals stall is reset by the watchdog
+  before anyone else can touch its volumes.
+- The daemon can be restarted under a running VM. Leases survive as sanlock
+  orphans and are re-adopted.
+
+Snapshots, thin provisioning, templates and linked clones are not built yet.
+See [Known limits](#known-limits-of-the-prototype) before trusting it with
+anything you love.
+
+## Why not just use ...
+
+| Option | What you give up |
+|---|---|
+| LVM on iSCSI (what Proxmox offers) | no snapshots, no thin, locking is a cluster-wide LVM lock, no fencing of a wedged node |
+| OCFS2 / GFS2 | a kernel filesystem, a DLM, corosync coupling, and a fencing stack to tune |
+| NFS or Ceph | a different storage protocol; your existing SAN stays idle |
+| nox | a Go daemon, a Perl plugin, and sanlock. Nothing in kernel space but device-mapper |
 
 ## Pieces
 
