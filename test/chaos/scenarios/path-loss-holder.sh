@@ -31,7 +31,7 @@ repair_holder() {
         wait_node_back "$ip" || return 1
         return 0
     fi
-    s "$ip" "systemctl restart noxd@nox" 30 >/dev/null 2>&1 || true
+    s "$ip" "systemctl restart $NOXD_UNIT" 30 >/dev/null 2>&1 || true
     wait_until 120 "noxd ready on $ip" sh -c "ssh -o BatchMode=yes root@$ip 'nox status 2>/dev/null' | grep -q 'ready true'" >/dev/null || true
 }
 

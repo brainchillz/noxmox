@@ -6,7 +6,7 @@ scenario_run() {
     node=$(other_node "$(vm_node)"); ip=$(node_ip "$node")
     log "noxd-kill-create on $node"
     for i in $(seq 1 25); do
-        s "$ip" "( nox create vm-7777-chaos-$i 256M >/tmp/chaos-create.out 2>&1; echo \$? > /tmp/chaos-create.rc ) & sleep 0.\$((RANDOM % 9)); systemctl kill -s KILL noxd; wait" 30 >/dev/null
+        s "$ip" "( nox create vm-7777-chaos-$i 256M >/tmp/chaos-create.out 2>&1; echo \$? > /tmp/chaos-create.rc ) & sleep 0.\$((RANDOM % 9)); systemctl kill -s KILL $NOXD_UNIT; wait" 30 >/dev/null
         wait_until 60 "noxd ready" sh -c "ssh -o BatchMode=yes root@$ip 'nox status 2>/dev/null' | grep -q 'ready true'" >/dev/null || { verdict=FAIL; reason+="noxd-not-back "; break; }
         if [ "$(s "$ip" "cat /tmp/chaos-create.rc" 10)" = 0 ]; then ok=$((ok+1)); else failed=$((failed+1)); fi
         # the table must agree with the exit status: present iff rc==0,

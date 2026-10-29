@@ -4,6 +4,7 @@
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "${LAB_ENV:-$HERE/lab.env}"
+NOXD_UNIT="noxd@${POOL:-nox}"
 
 ts() { date +%H:%M:%S; }
 log() { echo "[$(ts)] $*"; }
