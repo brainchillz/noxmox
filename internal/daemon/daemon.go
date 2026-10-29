@@ -1643,9 +1643,9 @@ func (d *Daemon) prStatus(resp proto.Response) error {
 	resp["pr_registered"] = true
 	resp["pr_aptpl"] = d.pr.APTPL()
 	if keys, err := d.pr.Keys(); err == nil {
-		var hs []uint64
+		hs := []string{}
 		for _, k := range keys {
-			hs = append(hs, k)
+			hs = append(hs, fmt.Sprintf("%#016x", k))
 		}
 		resp["pr_keys"] = hs
 	}

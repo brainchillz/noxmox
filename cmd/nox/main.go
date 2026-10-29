@@ -311,7 +311,7 @@ func main() {
 			if ks, ok := r["pr_keys"].([]any); ok {
 				fmt.Printf("keys (%d):\n", len(ks))
 				for _, k := range ks {
-					fmt.Printf("  %#x\n", uint64(k.(float64)))
+					fmt.Printf("  %v\n", k)
 				}
 			}
 		}
