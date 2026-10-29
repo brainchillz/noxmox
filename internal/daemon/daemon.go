@@ -763,7 +763,7 @@ func (d *Daemon) rename(name, newName string, resp proto.Response) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	h, isHeld := d.held[name]
-	if isHeld && h.mode != sanlock.Exclusive {
+	if isHeld && h.mode != sanlock.Exclusive && !h.backing {
 		return errors.New("cannot rename during migration")
 	}
 	return d.withMeta(func(t *store.Table) error {
@@ -1227,10 +1227,7 @@ func (d *Daemon) resize(name string, size uint64, virtSize uint64, resp proto.Re
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	h, isHeld := d.held[name]
-	if isHeld && h.backing {
-		return errors.New("cannot resize a backing volume")
-	}
-	if isHeld && h.mode != sanlock.Exclusive {
+	if isHeld && h.mode != sanlock.Exclusive && !h.backing {
 		return errors.New("cannot resize during migration")
 	}
 	return d.withMeta(func(t *store.Table) error {
