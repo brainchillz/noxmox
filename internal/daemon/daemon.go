@@ -12,11 +12,14 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"noxmox/internal/fence"
 	"noxmox/internal/proto"
 	"noxmox/internal/sanlock"
 	"noxmox/internal/store"
@@ -132,6 +135,7 @@ func Run(cfg Config) error {
 		_ = os.Symlink(cfg.Socket, proto.DefaultSocket)
 	}
 
+	go d.handleSignals()
 	go d.join()
 	for {
 		c, err := l.Accept()
@@ -1445,4 +1449,57 @@ func (d *Daemon) setIOTimeout(n int, resp proto.Response) error {
 	go d.join()
 	resp["io_timeout"] = n
 	return nil
+}
+
+// handleSignals catches SIGTERM so the daemon, not sanlock, decides when it
+// is safe to let go. An ordinary stop (healthy lockspace, LUN reachable)
+// exits cleanly and leaves the leases as orphans. During a fence (a fence
+// marker is set, or the LUN has gone away) the daemon refuses to exit while
+// any guest still holds one of the pool's volumes: sanlock then cannot clear
+// the host and the watchdog resets it, which is the only thing that stops a
+// wedged guest. Once the fence killpath has stopped the guests, the next
+// signal finds none holding and the daemon exits, so a survivor can take
+// over without a host reset. SIGKILL is restricted, so sanlock can only
+// send SIGTERM, which this catches.
+func (d *Daemon) handleSignals() {
+	sigc := make(chan os.Signal, 4)
+	signal.Notify(sigc, syscall.SIGTERM, syscall.SIGINT)
+	warned := false
+	for range sigc {
+		fencing := fence.InProgress(d.cfg.Pool, 2*time.Minute) || !d.lunReachable()
+		if !fencing {
+			d.lg.Printf("SIGTERM: stopping; leases stay as orphans")
+			os.Exit(0)
+		}
+		devs, _ := fence.Devices(d.cfg.Pool)
+		if h := fence.Holders(devs); len(h) == 0 {
+			d.lg.Printf("SIGTERM during fence: no guest holds the pool, releasing and exiting")
+			fence.Teardown(d.cfg.Pool)
+			fence.Clear(d.cfg.Pool)
+			os.Exit(0)
+		} else if !warned {
+			d.lg.Printf("SIGTERM during fence: %d guest(s) still hold the pool; staying up so the watchdog fences this host", len(h))
+			warned = true
+		}
+		// do not exit: sanlock keeps sending SIGTERM, the watchdog keeps
+		// counting down, and whichever clears the guests first wins.
+	}
+}
+
+// lunReachable reports whether the pool device still answers a small read
+// within a short timeout. During a storage-loss fence it does not, which is
+// how the signal handler tells a fence from an ordinary stop even if the
+// killpath never ran.
+func (d *Daemon) lunReachable() bool {
+	done := make(chan bool, 1)
+	go func() {
+		_, err := d.pool.Dev.ReadAt(0, store.SBSize)
+		done <- err == nil
+	}()
+	select {
+	case ok := <-done:
+		return ok
+	case <-time.After(3 * time.Second):
+		return false
+	}
 }
