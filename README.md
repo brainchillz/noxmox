@@ -1,5 +1,7 @@
 # nox
 
+[![ci](https://github.com/brainchillz/noxmox/actions/workflows/ci.yml/badge.svg)](https://github.com/brainchillz/noxmox/actions/workflows/ci.yml)
+
 **Shared iSCSI storage for Proxmox that works the way you expected it to.**
 
 Ever pointed a Proxmox cluster at an iSCSI LUN and found it tedious to manage?
@@ -157,3 +159,14 @@ Host ids must be unique per node and stable. Then, once:
   recovered after a node dies.
 - Never restart sanlock on a node with a joined lockspace: wdmd will reset
   the node. Stopping noxd is safe, leases stay as orphans.
+
+## Building and contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build commands, the CI setup
+and the repository hooks. Releases are tagged `vX.Y.Z`; `nox version` prints
+the tag a binary was built from.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE). sanlock itself is LGPL-2.1+ and
+is linked dynamically.

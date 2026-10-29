@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  go:
+    name: go vet, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install libsanlock-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsanlock-dev
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build
+        run: go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" -o bin/nox ./cmd/nox
+      - run: ./bin/nox version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nox-linux-amd64
+          path: bin/nox
+
+  perl:
+    name: perl -c NoxPlugin.pm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: perl -I test/pve-stubs -c pve/NoxPlugin.pm

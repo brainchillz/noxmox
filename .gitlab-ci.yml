@@ -1,0 +1,27 @@
+# Mirror of .github/workflows/ci.yml for the private GitLab copy.
+# Jobs need a runner with the "docker" tag and a docker executor.
+stages: [check]
+
+go:
+  stage: check
+  image: golang:1.26-bookworm
+  tags: [docker]
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq libsanlock-dev >/dev/null
+  script:
+    - go vet ./...
+    - go test ./...
+    - go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" -o bin/nox ./cmd/nox
+    - ./bin/nox version
+  artifacts:
+    paths: [bin/nox]
+    expire_in: 1 week
+
+perl:
+  stage: check
+  image: perl:5.40-slim
+  tags: [docker]
+  script:
+    - perl -I test/pve-stubs -c pve/NoxPlugin.pm
