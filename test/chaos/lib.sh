@@ -89,6 +89,7 @@ nox_check() { # nox_check IP: table and lease consistency, prints problems
 
 verifier_setup() { # verifier_setup IP: make sure the guest has the verifier disk
     local ip=$1
+    agent_wait "$ip" >/dev/null || die "guest agent on $ip not responding"
     if ! s "$ip" "qm config $VMID" 20 | grep -q '^scsi1:'; then
         log "adding verifier disk scsi1 (${VERIFIER_GB}G) to guest $VMID"
         s "$ip" "qm set $VMID --scsi1 $STORAGE:$VERIFIER_GB,ssd=1" 120 >/dev/null || die "cannot add verifier disk"
