@@ -8,7 +8,7 @@ Ever pointed a Proxmox cluster at an iSCSI LUN and found it tedious to manage?
 You get LVM on top of the LUN, no snapshots, no thin provisioning, and a nagging
 feeling that nothing is actually stopping two nodes from writing to the same
 disk at once. The alternatives are a clustered filesystem with its own DLM and
-fencing stack to babysit, or giving up and buying NFS.
+fencing stack to babysit, or giving up and using NFS.
 
 If you came from VMware, you remember it being easier. One LUN, every host sees
 it, VMs live on it, vMotion just works. That is VMFS, and Linux never had an
