@@ -23,18 +23,19 @@ const DefaultSocket = "/run/noxd.sock"
 
 // Request is a client command.
 type Request struct {
-	Op       string   `json:"op"`
-	Name     string   `json:"name,omitempty"`
-	Size     uint64   `json:"size,omitempty"`
-	Mode     string   `json:"mode,omitempty"`      // "ex" or "sh"
-	Timeout  int      `json:"timeout,omitempty"`   // seconds
-	Names    []string `json:"names,omitempty"`     // prepare: volumes about to be activated shared
-	Full     bool     `json:"full,omitempty"`      // check: also read every free slot's lease
-	Format   string   `json:"format,omitempty"`    // create: "raw" (default) or "qcow2"
-	Parent   string   `json:"parent,omitempty"`    // create: name of the backing volume
-	NewName  string   `json:"new_name,omitempty"`  // rename: the new name
-	VirtSize uint64   `json:"virt_size,omitempty"` // create/resize: guest visible size of a qcow2 volume
-	Reparent bool     `json:"reparent,omitempty"`  // delete: volume is a merged chain member, re-point its children
+	Op        string   `json:"op"`
+	Name      string   `json:"name,omitempty"`
+	Size      uint64   `json:"size,omitempty"`
+	Mode      string   `json:"mode,omitempty"`       // "ex" or "sh"
+	Timeout   int      `json:"timeout,omitempty"`    // seconds
+	Names     []string `json:"names,omitempty"`      // prepare: volumes about to be activated shared
+	Full      bool     `json:"full,omitempty"`       // check: also read every free slot's lease
+	Format    string   `json:"format,omitempty"`     // create: "raw" (default) or "qcow2"
+	Parent    string   `json:"parent,omitempty"`     // create: name of the backing volume
+	NewName   string   `json:"new_name,omitempty"`   // rename: the new name
+	VirtSize  uint64   `json:"virt_size,omitempty"`  // create/resize: guest visible size of a qcow2 volume
+	Reparent  bool     `json:"reparent,omitempty"`   // delete: volume is a merged chain member, re-point its children
+	IOTimeout int      `json:"io_timeout,omitempty"` // set-io-timeout: new sanlock io_timeout in seconds
 }
 
 // Response carries ok/error plus op-specific fields.

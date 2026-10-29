@@ -37,6 +37,7 @@ func usage() {
   nox check [--full] [--json]             table consistency and lease holders
   nox repair                              drop stale devices and leases, restore damaged record copies
   nox upgrade                             move a format v1 pool to v2 (all volumes inactive)
+  nox set-io-timeout SEC                  rewrite the lockspace timeout (other daemons stopped)
   nox version`)
 	os.Exit(2)
 }
@@ -253,6 +254,16 @@ func main() {
 		}
 		call(proto.Request{Op: "rename", Name: pos[0], NewName: pos[1]}, 60*time.Second)
 		fmt.Printf("renamed %s to %s\n", pos[0], pos[1])
+	case "set-io-timeout":
+		if len(pos) < 1 {
+			usage()
+		}
+		n, err := strconv.Atoi(pos[0])
+		if err != nil {
+			die(err)
+		}
+		r := call(proto.Request{Op: "set-io-timeout", IOTimeout: n}, 10*time.Minute)
+		fmt.Printf("io_timeout is now %v; the daemon is rejoining the lockspace, start the other daemons again\n", r["io_timeout"])
 	case "upgrade":
 		r := call(proto.Request{Op: "upgrade"}, 10*time.Minute)
 		fmt.Printf("pool is now format v%v (%v host ids)\n", r["format"], r["max_hosts"])

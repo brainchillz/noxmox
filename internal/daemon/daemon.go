@@ -541,6 +541,8 @@ func (d *Daemon) dispatch(req proto.Request, resp proto.Response) error {
 		return d.check(req.Full, resp)
 	case "repair":
 		return d.repair(resp)
+	case "set-io-timeout":
+		return d.setIOTimeout(req.IOTimeout, resp)
 	}
 	return fmt.Errorf("unknown op %q", req.Op)
 }
@@ -1385,4 +1387,49 @@ func (d *Daemon) repair(resp proto.Response) error {
 		resp["actions"] = actions
 		return nil
 	})
+}
+
+// setIOTimeout rewrites the lockspace with a new io_timeout and records it
+// in the superblock. Every host must join with the same value, so this is
+// only allowed when this host holds nothing and no other host is live in
+// the lockspace: the caller stops the other daemons first. This daemon
+// leaves and rejoins the lockspace itself.
+func (d *Daemon) setIOTimeout(n int, resp proto.Response) error {
+	if n < 1 || n > 120 {
+		return fmt.Errorf("io_timeout %d out of range (1..120)", n)
+	}
+	if d.pool.Super.Version < 2 {
+		return errors.New("recording io_timeout needs a format v2 pool (nox upgrade)")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.held) > 0 {
+		return errors.New("volumes are active on this host")
+	}
+	hosts, err := sanlock.Hosts(d.ls.Name, 0)
+	if err != nil {
+		return err
+	}
+	for _, h := range hosts {
+		if h.HostID != d.cfg.HostID && sanlock.HostState(h) == sanlock.HostLive {
+			return fmt.Errorf("host %d is live in the lockspace; stop its daemon first", h.HostID)
+		}
+	}
+	d.ready.Store(false)
+	if err := sanlock.RemLockspace(d.ls); err != nil {
+		d.ready.Store(true)
+		return fmt.Errorf("leave lockspace: %w", err)
+	}
+	if err := sanlock.WriteLockspace(d.ls, 0, n); err != nil {
+		return fmt.Errorf("rewrite lockspace: %w", err)
+	}
+	ns := *d.pool.Super
+	ns.IOTimeout = uint32(n)
+	if err := d.pool.WriteSuper(&ns); err != nil {
+		return err
+	}
+	d.lg.Printf("io_timeout set to %d, rejoining lockspace", n)
+	go d.join()
+	resp["io_timeout"] = n
+	return nil
 }
