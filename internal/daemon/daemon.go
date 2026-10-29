@@ -108,7 +108,7 @@ func Run(cfg Config) error {
 	// signal the daemon; a host that cannot renew is reset by wdmd instead.
 	// systemd still stops the daemon with SIGTERM for restarts; its leases
 	// stay behind as orphans and are adopted by the next instance.
-	if err := sanlock.RestrictAll(d.sock); err != nil {
+	if err := sanlock.RestrictKillSignals(d.sock); err != nil {
 		return fmt.Errorf("sanlock restrict: %w", err)
 	}
 	lg.Printf("pool %s %s (format v%d) on %s, host id %d, lockspace %s, io_timeout %d", cfg.Pool, pool.Super.UUIDString(), pool.Super.Version, cfg.Device, cfg.HostID, d.ls.Name, d.ioTimeout())

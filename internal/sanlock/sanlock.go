@@ -162,12 +162,20 @@ func RestrictSigkill(sock int) error {
 	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_SIGKILL))
 }
 
-// RestrictAll forbids sanlock from signalling this process at all. When
-// the host can no longer renew its lease, sanlock then cannot clear the
-// lease holder and must let the watchdog reset the host, which is the only
-// thing that also stops the guests using the volumes.
-func RestrictAll(sock int) error {
-	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_ALL))
+// RestrictKillSignals forbids sanlock from killing this process with either
+// SIGTERM or SIGKILL when a lease is lost. With no signal it is allowed to
+// use, sanlock can never clear the daemon's pids on a lockspace renewal
+// failure, so wdmd lets the watchdog reset the whole host. That is what we
+// want: the data-path writers are the guests' QEMU processes, not the
+// daemon, so clearing the daemon would let sanlock call the host clean and
+// disarm the watchdog while the guests keep writing. Resetting the host is
+// the only thing that stops them. systemd still stops the daemon with its
+// own SIGTERM for restarts; that is unaffected, and its leases persist as
+// orphans. SANLK_RESTRICT_ALL is deliberately not used: it refuses every
+// further command on the connection, including the acquires the daemon
+// makes on this same socket.
+func RestrictKillSignals(sock int) error {
+	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_SIGKILL|C.SANLK_RESTRICT_SIGTERM))
 }
 
 // WriteLockspace initializes the delta-lease area on disk. maxHosts 0 means
