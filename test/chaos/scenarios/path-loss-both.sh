@@ -14,7 +14,8 @@ scenario_run() {
     declare -A held
     for n in $(node_names); do
         ip=$(node_ip "$n")
-        held[$n]=$(s "$ip" "nox status 2>/dev/null | grep -c '^held'" 15 || echo 0)
+        held[$n]=$(s "$ip" "nox status 2>/dev/null | grep -c '^held' || true" 15 | tr -dc '0-9')
+        held[$n]=${held[$n]:-0}
         log "$n holds ${held[$n]} leases before the outage"
     done
 

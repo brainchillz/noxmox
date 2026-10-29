@@ -15,12 +15,22 @@ drop_path() {
 restore_path() {
     s "$1" "iptables -D OUTPUT -d $TARGET_IP -p tcp --dport 3260 -j DROP 2>/dev/null; iptables -D INPUT -s $TARGET_IP -p tcp --sport 3260 -j DROP 2>/dev/null; iscsiadm -m session -R >/dev/null 2>&1; echo restored" 30
 }
-# a holder that fenced by killing its guest (not by resetting) is left with a
-# wedged iSCSI session; bring it back without a reboot
+# A holder that fenced by killing its guest (not by resetting) is left with
+# a wedged iSCSI session: this LIO fileio target does not re-present its LUN
+# after a portal flap until a fresh login, so a rescan is not enough. Try a
+# clean logout/login, and if the LUN still will not come back, reboot the
+# node (it has no guests at this point).
 repair_holder() {
     local ip=$1
     restore_path "$ip"
-    s "$ip" "L=\$(readlink -f /dev/disk/by-id/scsi-$WWID 2>/dev/null); for h in /sys/class/scsi_host/host*/scan; do echo '- - -' > \$h 2>/dev/null; done; sleep 3; udevadm trigger --subsystem-match=block; udevadm settle" 60 >/dev/null 2>&1 || true
+    s "$ip" "iscsiadm -m node -T $TARGET_IQN --logout >/dev/null 2>&1; sleep 2; iscsiadm -m node -T $TARGET_IQN --login >/dev/null 2>&1; sleep 4; udevadm settle" 60 >/dev/null 2>&1 || true
+    if ! s "$ip" "test -e /dev/disk/by-id/scsi-$WWID" 15; then
+        log "holder $ip did not re-present the LUN after re-login; rebooting it"
+        s "$ip" "nohup reboot >/dev/null 2>&1 &" 10 || true
+        sleep 20
+        wait_node_back "$ip" || return 1
+        return 0
+    fi
     s "$ip" "systemctl restart noxd@nox" 30 >/dev/null 2>&1 || true
     wait_until 120 "noxd ready on $ip" sh -c "ssh -o BatchMode=yes root@$ip 'nox status 2>/dev/null' | grep -q 'ready true'" >/dev/null || true
 }
