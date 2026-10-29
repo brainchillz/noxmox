@@ -22,12 +22,16 @@ def main():
     import mmap
     buf = mmap.mmap(-1, BS)
     while seq < nblocks and not stop:
-        payload = (struct.pack("<I", seq) * ((BS - 32) // 4))
+        # header (24) + payload fills BS-4 bytes exactly; the CRC over all
+        # of it is the last 4 bytes of the block, which is what verify.py
+        # checks
         hdr = MAGIC + struct.pack("<QQ", run, seq)
+        payload = struct.pack("<I", seq) * ((BS - 4 - len(hdr)) // 4)
         body = hdr + payload
+        body += b"\0" * (BS - 4 - len(body))
         crc = zlib.crc32(body) & 0xffffffff
         rec = body + struct.pack("<I", crc)
-        rec += b"\0" * (BS - len(rec))
+        assert len(rec) == BS
         buf.seek(0); buf.write(rec)
         os.pwrite(fd, buf, seq * BS)
         os.fsync(fd)
