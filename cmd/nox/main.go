@@ -113,7 +113,7 @@ func main() {
 		pos = append(pos, args[i])
 	}
 
-	if *socket == "" {
+	if *socket == "" && cmd != "daemon" {
 		*socket = proto.SocketPath(*pool)
 		if _, err := os.Stat(*socket); err != nil && *pool == proto.DefaultPool {
 			*socket = proto.DefaultSocket // a daemon from before pool names
