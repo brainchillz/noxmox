@@ -22,6 +22,7 @@ import (
 	"noxmox/internal/fence"
 	"noxmox/internal/proto"
 	"noxmox/internal/sanlock"
+	"noxmox/internal/scsipr"
 	"noxmox/internal/store"
 )
 
@@ -72,6 +73,7 @@ type Daemon struct {
 	mailSeen map[[2]uint64]time.Time     // (sender, seq) of handled mailbox requests
 	mailSeq  uint64
 	stats    stats
+	pr       *scsipr.Dev // non-nil when the pool is in PR mode on this node
 	ready    atomic.Bool
 	lg       *log.Logger
 }
@@ -107,6 +109,21 @@ func Run(cfg Config) error {
 	}
 	// Use SIGTERM, not SIGKILL, if sanlock has to kill the daemon for some
 	// non-fence reason: it then exits cleanly and its leases orphan.
+	// If the pool is in persistent-reservation mode, register this host's PR
+	// key on the LUN before anything writes it (sanlock's own lease renewals
+	// are writes). A node that cannot register must not run unprotected.
+	if pool.Super.HasPR() {
+		prd, err := scsipr.Open(cfg.Device)
+		if err != nil {
+			return fmt.Errorf("pr: open device: %w", err)
+		}
+		if err := prd.Register(scsipr.KeyForHost(cfg.HostID)); err != nil {
+			prd.Close()
+			return fmt.Errorf("pr: this pool is in PR mode but this host could not register a key (%w); refusing to start unprotected", err)
+		}
+		d.pr = prd
+		lg.Printf("pr: registered key %#x (APTPL=%v)", scsipr.KeyForHost(cfg.HostID), prd.APTPL())
+	}
 	_ = sanlock.RestrictSigkill(d.sock)
 	// The real storage-loss fence: when sanlock loses the lockspace it runs
 	// this instead of just killing the daemon, so the guests that actually
@@ -560,6 +577,12 @@ func (d *Daemon) dispatch(req proto.Request, resp proto.Response) error {
 		return d.repair(resp)
 	case "set-io-timeout":
 		return d.setIOTimeout(req.IOTimeout, resp)
+	case "pr-enable":
+		return d.prEnable(resp)
+	case "pr-reserve":
+		return d.prReserve(resp)
+	case "pr-status":
+		return d.prStatus(resp)
 	}
 	return fmt.Errorf("unknown op %q", req.Op)
 }
@@ -651,6 +674,7 @@ func (d *Daemon) status(resp proto.Response) error {
 	resp["mailbox"] = s.HasMailbox()
 	resp["io_timeout"] = d.ioTimeout()
 	resp["max_hosts"] = s.MaxHosts
+	resp["pr_mode"] = s.HasPR()
 	total := s.DataExtents * s.ExtentSize
 	resp["total"] = total
 	t, err := d.pool.ReadTable()
@@ -977,6 +1001,15 @@ func (d *Daemon) activate(req proto.Request, resp proto.Response) error {
 	lastAsk := time.Time{}
 	asked := map[uint64]bool{}
 	t0 := time.Now()
+	// Remember who held this lease when we started, so that if we take it
+	// over exclusively (the holder died) we can fence that host at the array
+	// with a PR preempt before we map the volume.
+	var priorOwners []sanlock.Owner
+	if d.pr != nil && mode == sanlock.Exclusive {
+		if owners, _, oerr := sanlock.Owners(r); oerr == nil {
+			priorOwners = owners
+		}
+	}
 	// The lease wait runs without the daemon lock so status, list and
 	// unrelated activations keep working during a migration handoff.
 	for {
@@ -1014,6 +1047,13 @@ func (d *Daemon) activate(req proto.Request, resp proto.Response) error {
 		return fmt.Errorf("%s: %w (deleted while waiting for its lease)", req.Name, store.ErrNotFound)
 	} else {
 		v = cur
+	}
+	// PR fence: if we just took this volume over from a host that is not
+	// live any more, preempt its PR key so the array rejects any lingering
+	// writes from it, independent of the watchdog. Only for exclusive
+	// takeover, never for a migration (the source is alive and sharing).
+	if d.pr != nil && mode == sanlock.Exclusive && len(priorOwners) > 0 {
+		d.preemptDead(priorOwners)
 	}
 	// No grace on the acquiring side: an early upgrade attempt simply fails
 	// while the peer still holds its shared lease.
@@ -1468,6 +1508,11 @@ func (d *Daemon) handleSignals() {
 	for range sigc {
 		fencing := fence.InProgress(d.cfg.Pool, 2*time.Minute) || !d.lunReachable()
 		if !fencing {
+			if d.pr != nil {
+				// a clean stop: drop our PR registration so we are not left
+				// as a stale registrant (a fence would preempt us instead).
+				_ = d.pr.Unregister(scsipr.KeyForHost(d.cfg.HostID))
+			}
 			d.lg.Printf("SIGTERM: stopping; leases stay as orphans")
 			os.Exit(0)
 		}
@@ -1502,4 +1547,110 @@ func (d *Daemon) lunReachable() bool {
 	case <-time.After(3 * time.Second):
 		return false
 	}
+}
+
+// preemptDead preempts the PR keys of prior lease owners that sanlock no
+// longer reports as live, fencing a dead host at the array. A still-live
+// owner (a clean release, or a migration source) is left alone.
+func (d *Daemon) preemptDead(owners []sanlock.Owner) {
+	if d.pr == nil {
+		return
+	}
+	live := map[uint64]bool{}
+	if hs, err := sanlock.Hosts(d.ls.Name, 0); err == nil {
+		for _, h := range hs {
+			if sanlock.HostState(h) == sanlock.HostLive {
+				live[h.HostID] = true
+			}
+		}
+	}
+	me := scsipr.KeyForHost(d.cfg.HostID)
+	for _, o := range owners {
+		if o.HostID == d.cfg.HostID || live[o.HostID] {
+			continue
+		}
+		vk := scsipr.KeyForHost(o.HostID)
+		if err := d.pr.Preempt(me, vk); err != nil {
+			d.lg.Printf("pr: preempt of dead host %d (key %#x) failed: %v", o.HostID, vk, err)
+		} else {
+			d.lg.Printf("pr: fenced dead host %d at the array (preempted key %#x)", o.HostID, vk)
+		}
+	}
+}
+
+// prEnable turns on PR mode for the pool: it verifies this host can use PR,
+// sets the feature bit in the superblock, and registers this host's key.
+// It does NOT create the reservation; enforcement starts only once every
+// node has registered and prReserve is called, so enabling cannot fence a
+// node that has not yet joined PR mode.
+func (d *Daemon) prEnable(resp proto.Response) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.pool.Super.Version < 2 {
+		return errors.New("PR mode needs a format v2 pool (nox upgrade)")
+	}
+	prd, err := scsipr.Open(d.cfg.Device)
+	if err != nil {
+		return fmt.Errorf("pr: open device: %w", err)
+	}
+	if !prd.Supported() {
+		prd.Close()
+		return errors.New("the target does not implement persistent reservations")
+	}
+	if err := prd.Register(scsipr.KeyForHost(d.cfg.HostID)); err != nil {
+		prd.Close()
+		return fmt.Errorf("pr: register: %w", err)
+	}
+	return d.withMeta(func(t *store.Table) error {
+		ns := *d.pool.Super
+		ns.Features |= store.FeatPR
+		if err := d.pool.WriteSuper(&ns); err != nil {
+			prd.Close()
+			return err
+		}
+		d.pr = prd
+		d.lg.Printf("pr: enabled on pool; registered key %#x. Register every node, verify with nox pr status, then nox pr reserve to start enforcement.", scsipr.KeyForHost(d.cfg.HostID))
+		resp["pr"] = true
+		return nil
+	})
+}
+
+// prReserve creates the all-registrants reservation, which switches
+// enforcement on. Call it only once every participating node has registered
+// (check nox pr status), or an unregistered node will be fenced.
+func (d *Daemon) prReserve(resp proto.Response) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.pr == nil {
+		return errors.New("PR is not enabled on this node")
+	}
+	if err := d.pr.Reserve(scsipr.KeyForHost(d.cfg.HostID)); err != nil {
+		return err
+	}
+	keys, _ := d.pr.Keys()
+	d.lg.Printf("pr: reservation active; enforcement on. %d keys registered.", len(keys))
+	resp["keys"] = len(keys)
+	return nil
+}
+
+// prStatus reports PR mode and the registered keys.
+func (d *Daemon) prStatus(resp proto.Response) error {
+	resp["pr_mode"] = d.pool.Super.HasPR()
+	if d.pr == nil {
+		resp["pr_registered"] = false
+		return nil
+	}
+	resp["pr_registered"] = true
+	resp["pr_aptpl"] = d.pr.APTPL()
+	if keys, err := d.pr.Keys(); err == nil {
+		var hs []uint64
+		for _, k := range keys {
+			hs = append(hs, k)
+		}
+		resp["pr_keys"] = hs
+	}
+	if _, _, held, err := d.pr.Reservation(); err == nil {
+		resp["pr_reservation"] = held
+	}
+	return nil
 }

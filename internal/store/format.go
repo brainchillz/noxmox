@@ -42,6 +42,7 @@ const (
 	// Feature bits in a v2 superblock. A daemon that does not know a bit
 	// must refuse the pool.
 	FeatMailbox = 1 << 0
+	FeatPR      = 1 << 1 // SCSI-3 persistent reservations active on this pool
 
 	// Mailbox geometry: one block per host id, written by senders under the
 	// mailbox lease, polled by its owner.
@@ -79,6 +80,10 @@ type Super struct {
 	MaxHosts        uint32 // host ids 1..MaxHosts
 	Tool            string // version of the tool that formatted or upgraded
 }
+
+// HasPR reports whether the pool uses SCSI-3 persistent reservations as an
+// extra fence layer. Off unless explicitly enabled on a PR-capable target.
+func (s *Super) HasPR() bool { return s.Version >= 2 && s.Features&FeatPR != 0 }
 
 // HasMailbox reports whether the pool carries the on-disk request mailbox.
 func (s *Super) HasMailbox() bool {
@@ -267,8 +272,8 @@ func decodeSuper(b []byte) (*Super, error) {
 		s.IOTimeout = le.Uint32(b[144:])
 		s.MaxHosts = le.Uint32(b[148:])
 		s.Tool = string(bytes.TrimRight(b[152:168], "\x00"))
-		if s.Features&^FeatMailbox != 0 {
-			return nil, fmt.Errorf("pool uses unknown features %#x", s.Features&^FeatMailbox)
+		if s.Features&^(FeatMailbox|FeatPR) != 0 {
+			return nil, fmt.Errorf("pool uses unknown features %#x", s.Features&^(FeatMailbox|FeatPR))
 		}
 		if s.MaxHosts == 0 || s.MaxHosts > DefaultHosts {
 			return nil, fmt.Errorf("bad max hosts %d", s.MaxHosts)

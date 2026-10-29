@@ -40,6 +40,7 @@ func usage() {
   nox repair                              drop stale devices and leases, restore damaged record copies
   nox upgrade                             move a format v1 pool to v2 (all volumes inactive)
   nox set-io-timeout SEC                  rewrite the lockspace timeout (other daemons stopped)
+  nox pr-enable | pr-reserve | pr-status  manage SCSI-3 persistent reservations (optional fence layer)
   nox version`)
 	os.Exit(2)
 }
@@ -292,6 +293,28 @@ func main() {
 		}
 		r := call(proto.Request{Op: "set-io-timeout", IOTimeout: n}, 10*time.Minute)
 		fmt.Printf("io_timeout is now %v; the daemon is rejoining the lockspace, start the other daemons again\n", r["io_timeout"])
+	case "pr-enable":
+		call(proto.Request{Op: "pr-enable"}, 60*time.Second)
+		fmt.Println("PR mode enabled and this host registered. Register every node (restart their daemons),")
+		fmt.Println("check 'nox pr-status' shows all host keys, then run 'nox pr-reserve' once to start enforcement.")
+	case "pr-reserve":
+		r := call(proto.Request{Op: "pr-reserve"}, 60*time.Second)
+		fmt.Printf("PR reservation active; enforcement on (%v keys registered)\n", r["keys"])
+	case "pr-status":
+		r := call(proto.Request{Op: "pr-status"}, 30*time.Second)
+		if *asJSON {
+			printJSON(r)
+		} else {
+			fmt.Printf("pr mode:       %v\n", r["pr_mode"])
+			fmt.Printf("registered:    %v (aptpl %v)\n", r["pr_registered"], r["pr_aptpl"])
+			fmt.Printf("reservation:   %v\n", r["pr_reservation"])
+			if ks, ok := r["pr_keys"].([]any); ok {
+				fmt.Printf("keys (%d):\n", len(ks))
+				for _, k := range ks {
+					fmt.Printf("  %#x\n", uint64(k.(float64)))
+				}
+			}
+		}
 	case "upgrade":
 		r := call(proto.Request{Op: "upgrade"}, 10*time.Minute)
 		fmt.Printf("pool is now format v%v (%v host ids)\n", r["format"], r["max_hosts"])
