@@ -101,12 +101,14 @@ func DMRename(oldName, newName string) error {
 	return dmsetup("", "rename", DMName(oldName), DMName(newName))
 }
 
-// DMRemove tears the device down. Fails if it is open.
+// DMRemove tears the device down. Fails if it is open. udev probes a
+// device for a moment after it changes, so the removal is retried for a
+// few seconds before an open device counts as in use.
 func DMRemove(name string) error {
 	if !DMExists(name) {
 		return nil
 	}
-	return dmsetup("", "remove", DMName(name))
+	return dmsetup("", "remove", "--retry", DMName(name))
 }
 
 // DMList returns the names of all nox mapped devices on this host.
