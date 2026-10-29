@@ -6,9 +6,12 @@ scenario_run() {
     holder=$(vm_node); target=$(other_node "$holder"); hip=$(node_ip "$holder"); tip=$(node_ip "$target")
     log "migrating $VMID $holder -> $target and killing the target QEMU"
     # patterns are anchored so they never match the shell that runs them
-    s "$hip" "nohup qm migrate $VMID $target --online > /tmp/chaos-migrate.log 2>&1 & echo \$! > /tmp/chaos-migrate.pid" 15
+    # throttle the memory copy so the kill lands mid-copy on any link
+    # (a 2 GiB guest finishes in under ten seconds unthrottled)
+    s "$hip" "nohup qm migrate $VMID $target --online --bwlimit ${CHAOS_MIGRATE_BWLIMIT:-20480} > /tmp/chaos-migrate.log 2>&1 & echo \$! > /tmp/chaos-migrate.pid" 15
     wait_until 120 "target qemu" s "$tip" "pgrep -f '^/usr/bin/kvm -id $VMID ' >/dev/null" 10 >/dev/null || { result migrate-abort FAIL "target-never-started"; return 1; }
-    sleep 4
+    wait_until 60 "memory copy to start" s "$hip" "grep -q 'migration status: active' /tmp/chaos-migrate.log" 10 >/dev/null
+    sleep 3
     s "$tip" "pkill -9 -f '^/usr/bin/kvm -id $VMID '; echo killed" 15
     wait_until 300 "migrate command to finish" s "$hip" "! kill -0 \$(cat /tmp/chaos-migrate.pid) 2>/dev/null" 10 >/dev/null
     log "migrate log: $(s "$hip" "grep -E 'ERROR|failed|aborted' /tmp/chaos-migrate.log | tail -2" 10)"

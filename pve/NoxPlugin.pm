@@ -98,12 +98,8 @@ sub get_formats {
 
 sub properties {
     return {
-        pool => {
-            description => "Name of the nox pool (the daemon instance) on each node.",
-            type => 'string',
-            format => 'pve-storage-id',
-            optional => 1,
-        },
+        # 'pool' is a property PVE already defines (for Ceph); it is reused
+        # through options() as the nox pool name and must not be redeclared.
         'nox-socket' => {
             description => "Control socket of the noxd daemon on each node (default /run/noxd-<pool>.sock).",
             type => 'string',
