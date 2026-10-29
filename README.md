@@ -218,9 +218,27 @@ A second pool is a second config file and a second storage with
 `--pool NAME`: `/etc/nox/fast.conf`, `systemctl enable --now noxd@fast`,
 `pvesm add nox fastpool --pool fast ...`. Its volumes map as `fast-<name>`.
 
+## Persistent reservations (optional, where the target enforces them)
+
+On a target that truly enforces SCSI-3 persistent reservations (a real SAN,
+or a zvol/iblock LIO backstore, not a fileio backstore), nox can add PR as a
+second fence layer so the array itself rejects a fenced node's writes,
+independent of the watchdog. It is off by default and never required.
+
+    nox pr-probe --device DEV      # does this target implement PR at all?
+    test/chaos/pr-selftest.sh      # two-node proof that it actually enforces
+
+If both pass, enable it: `nox pr-enable` on each node (sets the pool's PR
+bit and registers the node), restart the daemons so every node registers,
+confirm `nox pr-status` lists every host key, then `nox pr-reserve` once to
+start enforcement. From then on each node registers its key on start and
+refuses to start if it cannot, and a survivor taking a volume over from a
+dead host preempts that host's key so the array drops its writes.
+
 ## CLI
 
     nox status | list | info NAME | check [--full] | repair | metrics
+    nox pr-probe --device DEV | pr-status | pr-enable | pr-reserve
     nox create NAME SIZE [--format qcow2] [--parent NAME] [--virt-size SIZE]
     nox delete NAME | resize NAME SIZE | rename NAME NEWNAME
     nox activate NAME [--shared] [--timeout SEC] | deactivate NAME
@@ -247,6 +265,13 @@ hand; `nox fence --pool NAME --dry-run` reports what it would stop.
   recovered after a node dies.
 - Never restart sanlock on a node with a joined lockspace: wdmd will reset
   the node. Stopping noxd is safe, leases stay as orphans.
+- After a node reboots during a full loss of the target, some iSCSI
+  targets (LIO fileio especially) do not re-present the LUN until a fresh
+  login, so the node can come back with the pool device missing and noxd
+  restart-looping. Set the iSCSI nodes to automatic startup and, after such
+  an outage, re-login the target (`iscsiadm -m node -T <iqn> --logout` then
+  `--login`) or reboot. Enforced-PR and multipath both need the session
+  healthy.
 - Multipath is untested. The timeout rule above applies to `no_path_retry`
   as well: it must give up before sanlock does.
 
