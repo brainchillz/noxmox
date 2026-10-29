@@ -173,6 +173,20 @@ func RestrictSigkill(sock int) error {
 	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_SIGKILL))
 }
 
+// Killpath registers a program sanlock runs to stop this client's workload
+// when a lease is lost, instead of signalling the pid blindly. sanlock runs
+// it repeatedly until the pid clears or the watchdog fires, so the program
+// must be idempotent and must not touch the shared storage (which is what
+// has gone away). path is absolute; args is a single space-separated string
+// that sanlock splits into argv.
+func Killpath(sock int, path, args string) error {
+	cp := C.CString(path)
+	ca := C.CString(args)
+	defer C.free(unsafe.Pointer(cp))
+	defer C.free(unsafe.Pointer(ca))
+	return wrap("killpath", C.sanlock_killpath(C.int(sock), 0, cp, ca))
+}
+
 // WriteLockspace initializes the delta-lease area on disk. maxHosts 0 means
 // the sanlock default (2000 for 512-byte sectors).
 func WriteLockspace(l Lockspace, maxHosts int, ioTimeout int) error {

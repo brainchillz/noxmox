@@ -23,6 +23,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   nox format  --device DEV [--extent-size 256M] [--slots 1024] [--io-timeout 10] [--force]
   nox daemon  --device DEV --host-id N [--pool NAME] [--socket PATH]
+  nox fence   --pool NAME                 sanlock killpath: stop guests using the pool (not called by hand)
   every other command takes [--pool NAME] or [--socket PATH]
   nox status | list [--json]
   nox metrics                             prometheus text format
@@ -85,6 +86,13 @@ func main() {
 	if cmd == "version" {
 		fmt.Println("nox", version)
 		return
+	}
+	if cmd == "fence" {
+		fp := flag.NewFlagSet("fence", flag.ExitOnError)
+		fpool := fp.String("pool", proto.DefaultPool, "pool name")
+		fdry := fp.Bool("dry-run", false, "report what would be killed, do nothing")
+		_ = fp.Parse(args)
+		os.Exit(runFence(*fpool, *fdry))
 	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	device := fs.String("device", "", "shared block device")

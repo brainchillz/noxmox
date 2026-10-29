@@ -38,6 +38,7 @@ type Config struct {
 	Pool      string // pool name: selects the socket and the dm name prefix
 	Socket    string
 	IOTimeout int
+	Fencer    string // path to the fence helper (default /usr/sbin/nox)
 }
 
 type held struct {
@@ -101,11 +102,22 @@ func Run(cfg Config) error {
 	if d.sock, err = sanlock.Register(); err != nil {
 		return err
 	}
-	// Use SIGTERM, not SIGKILL, if sanlock has to kill the daemon: it then
-	// exits cleanly and its leases persist as orphans. This alone does not
-	// make storage-loss fencing reliable; see RestrictSigkill and the
-	// fencing design note in the roadmap.
+	// Use SIGTERM, not SIGKILL, if sanlock has to kill the daemon for some
+	// non-fence reason: it then exits cleanly and its leases orphan.
 	_ = sanlock.RestrictSigkill(d.sock)
+	// The real storage-loss fence: when sanlock loses the lockspace it runs
+	// this instead of just killing the daemon, so the guests that actually
+	// write the LUN are stopped before any peer can take over. The watchdog
+	// stays armed as the backstop if the helper cannot finish.
+	fencer := d.cfg.Fencer
+	if fencer == "" {
+		fencer = "/usr/sbin/nox"
+	}
+	if err := sanlock.Killpath(d.sock, fencer, "fence --pool "+d.cfg.Pool); err != nil {
+		lg.Printf("WARNING: could not register fence killpath: %v (storage-loss fencing will rely on the watchdog only)", err)
+	} else {
+		lg.Printf("fence killpath registered: %s fence --pool %s", fencer, d.cfg.Pool)
+	}
 	lg.Printf("pool %s %s (format v%d) on %s, host id %d, lockspace %s, io_timeout %d", cfg.Pool, pool.Super.UUIDString(), pool.Super.Version, cfg.Device, cfg.HostID, d.ls.Name, d.ioTimeout())
 
 	_ = os.Remove(cfg.Socket)
