@@ -14,3 +14,4 @@ proxmox-creds
 *.swp
 *~
 .DS_Store
+/test/chaos/logs/

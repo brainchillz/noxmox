@@ -31,6 +31,9 @@ func usage() {
   nox deactivate NAME
   nox resize NAME SIZE
   nox convert NAME ex|sh
+  nox rename NAME NEWNAME
+  nox check [--full] [--json]             table consistency and lease holders
+  nox upgrade                             move a format v1 pool to v2 (all volumes inactive)
   nox version`)
 	os.Exit(2)
 }
@@ -90,6 +93,7 @@ func main() {
 	shared := fs.Bool("shared", false, "activate in shared mode (migration target)")
 	timeout := fs.Int("timeout", 0, "seconds to wait for a lease")
 	asJSON := fs.Bool("json", false, "raw JSON output")
+	full := fs.Bool("full", false, "check: read every free slot's lease too")
 	// allow flags after positionals
 	var pos []string
 	for i := 0; i < len(args); i++ {
@@ -129,9 +133,15 @@ func main() {
 		if err != nil {
 			die(err)
 		}
-		p, err := store.Format(dev, es, uint32(*slots))
+		p, err := store.FormatVersion(dev, es, uint32(*slots), store.Version, version)
 		if err != nil {
 			die(err)
+		}
+		if *ioTimeout != store.DefaultIOTimeout {
+			p.Super.IOTimeout = uint32(*ioTimeout)
+			if err := p.WriteSuper(p.Super); err != nil {
+				die(err)
+			}
 		}
 		ls := sanlock.Lockspace{Name: p.Super.LockspaceName(), HostID: 1, Path: *device, Offset: p.Super.LockspaceOff}
 		if err := sanlock.WriteLockspace(ls, 0, *ioTimeout); err != nil {
@@ -140,13 +150,17 @@ func main() {
 		if err := sanlock.WriteResource(sanlock.Resource{Lockspace: ls.Name, Name: "meta", Path: *device, Offset: p.Super.MetaLeaseOff}); err != nil {
 			die(err)
 		}
+		if err := sanlock.WriteResource(sanlock.Resource{Lockspace: ls.Name, Name: "mbox", Path: *device, Offset: p.Super.MailboxLeaseOff}); err != nil {
+			die(err)
+		}
 		s := p.Super
-		fmt.Printf("formatted %s\n  uuid        %s\n  lockspace   %s\n  extent size %s\n  slots       %d\n  data offset %d\n  capacity    %s (%d extents)\n",
-			*device, s.UUIDString(), s.LockspaceName(), human(s.ExtentSize), s.Slots, s.DataOff, human(s.DataExtents*s.ExtentSize), s.DataExtents)
+		fmt.Printf("formatted %s\n  format      v%d\n  uuid        %s\n  lockspace   %s (io_timeout %d, %d host ids)\n  extent size %s\n  slots       %d\n  data offset %d\n  capacity    %s (%d extents)\n",
+			*device, s.Version, s.UUIDString(), s.LockspaceName(), s.IOTimeout, s.MaxHosts, human(s.ExtentSize), s.Slots, s.DataOff, human(s.DataExtents*s.ExtentSize), s.DataExtents)
 	case "daemon":
 		if *device == "" || *hostID == 0 {
 			usage()
 		}
+		daemon.Version = version
 		die(daemon.Run(daemon.Config{Device: *device, HostID: *hostID, Socket: *socket, IOTimeout: *ioTimeout}))
 	case "status":
 		r := call(proto.Request{Op: "status"}, 30*time.Second)
@@ -154,8 +168,8 @@ func main() {
 			printJSON(r)
 			return
 		}
-		fmt.Printf("nox       %s\npool      %v\nlockspace %v (host id %v, ready %v)\ncapacity  %s total, %s used, %s free, %v volumes\n", version,
-			r["uuid"], r["lockspace"], r["host_id"], r["ready"], human(uint64(r["total"].(float64))), human(uint64(r["used"].(float64))), human(uint64(r["free"].(float64))), r["volumes"])
+		fmt.Printf("nox       %s\npool      %v (format v%v, mailbox %v, io_timeout %v)\nlockspace %v (host id %v, ready %v)\ncapacity  %s total, %s used, %s free, %v volumes\n", version,
+			r["uuid"], r["format"], r["mailbox"], r["io_timeout"], r["lockspace"], r["host_id"], r["ready"], human(uint64(r["total"].(float64))), human(uint64(r["used"].(float64))), human(uint64(r["free"].(float64))), r["volumes"])
 		if hs, ok := r["hosts"].([]any); ok {
 			for _, h := range hs {
 				m := h.(map[string]any)
@@ -206,6 +220,15 @@ func main() {
 			usage()
 		}
 		call(proto.Request{Op: cmd, Name: pos[0]}, 60*time.Second)
+	case "rename":
+		if len(pos) < 2 {
+			usage()
+		}
+		call(proto.Request{Op: "rename", Name: pos[0], NewName: pos[1]}, 60*time.Second)
+		fmt.Printf("renamed %s to %s\n", pos[0], pos[1])
+	case "upgrade":
+		r := call(proto.Request{Op: "upgrade"}, 10*time.Minute)
+		fmt.Printf("pool is now format v%v (%v host ids)\n", r["format"], r["max_hosts"])
 	case "activate":
 		if len(pos) < 1 {
 			usage()
@@ -227,6 +250,41 @@ func main() {
 			usage()
 		}
 		fmt.Println(call(proto.Request{Op: "path", Name: pos[0]}, 10*time.Second)["path"])
+	case "check":
+		r := call(proto.Request{Op: "check", Full: *full}, 10*time.Minute)
+		if *asJSON {
+			printJSON(r)
+		} else {
+			for _, x := range r["volumes"].([]any) {
+				m := x.(map[string]any)
+				var hs []string
+				if hl, ok := m["holders"].([]any); ok {
+					for _, h := range hl {
+						hm := h.(map[string]any)
+						hs = append(hs, fmt.Sprintf("host %v", hm["host_id"]))
+					}
+				}
+				mode := "ex"
+				if sh, _ := m["shared"].(bool); sh {
+					mode = "sh"
+				}
+				if len(hs) == 0 {
+					fmt.Printf("%-24v slot %4v  free\n", m["name"], m["slot"])
+				} else {
+					fmt.Printf("%-24v slot %4v  %s %s\n", m["name"], m["slot"], mode, strings.Join(hs, ", "))
+				}
+			}
+			probs, _ := r["problems"].([]any)
+			for _, p := range probs {
+				fmt.Println("PROBLEM:", p)
+			}
+			if len(probs) == 0 {
+				fmt.Println("clean")
+			}
+		}
+		if ok, _ := r["clean"].(bool); !ok {
+			os.Exit(1)
+		}
 	default:
 		usage()
 	}

@@ -124,6 +124,28 @@ func checkRaw(s *Super, raw []byte) []Problem {
 		if ext < need {
 			add(int(slot), "%s: size %d needs %d extents, has %d", w.Name, w.Size, need, ext)
 		}
+		if w.HasParent() {
+			ps := w.ParentSlot()
+			if ps >= s.Slots {
+				add(int(slot), "%s: parent slot %d out of range", w.Name, ps)
+			} else {
+				pb := int(ps) * 2 * RecSize
+				pa, okPA := decodeVolume(raw[pb : pb+RecSize])
+				pbv, okPB := decodeVolume(raw[pb+RecSize : pb+2*RecSize])
+				var pw *Volume
+				if okPA && pa.Slot == ps {
+					pw = pa
+				}
+				if okPB && pbv.Slot == ps && (pw == nil || pbv.Gen > pw.Gen) {
+					pw = pbv
+				}
+				if pw == nil || pw.State != StateActive {
+					add(int(slot), "%s: parent slot %d is not an active volume", w.Name, ps)
+				} else if ps == slot {
+					add(int(slot), "%s: is its own parent", w.Name)
+				}
+			}
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Slot < out[j].Slot })
 	return out

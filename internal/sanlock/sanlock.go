@@ -189,6 +189,18 @@ func AddLockspace(l Lockspace) error {
 	return wrap("add_lockspace", rv)
 }
 
+// AddLockspaceTimeout joins the lockspace with an explicit io_timeout,
+// which every host of a pool must share; the pool records it.
+func AddLockspaceTimeout(l Lockspace, ioTimeout int) error {
+	ls := l.c()
+	defer C.free(unsafe.Pointer(ls))
+	rv := C.sanlock_add_lockspace_timeout(ls, 0, C.uint32_t(ioTimeout))
+	if rv == -17 { // EEXIST: already joined
+		return nil
+	}
+	return wrap("add_lockspace_timeout", rv)
+}
+
 // RemLockspace leaves the lockspace, releasing all leases held in it.
 func RemLockspace(l Lockspace) error {
 	ls := l.c()

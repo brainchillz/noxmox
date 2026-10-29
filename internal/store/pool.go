@@ -18,17 +18,29 @@ type Pool struct {
 	Super *Super
 }
 
-// Format writes a fresh superblock and an empty volume table. Lease regions
-// are initialized by the caller through sanlock.
+// Format writes a fresh superblock and an empty volume table in the newest
+// format. Lease regions are initialized by the caller through sanlock.
 func Format(dev *Device, extentSize uint64, slots uint32) (*Pool, error) {
-	s, err := Layout(dev.Size, extentSize, slots)
+	return FormatVersion(dev, extentSize, slots, Version, "")
+}
+
+// FormatVersion formats in a specific version; tool is recorded in a v2
+// superblock for diagnostics.
+func FormatVersion(dev *Device, extentSize uint64, slots uint32, version uint32, tool string) (*Pool, error) {
+	s, err := LayoutVersion(dev.Size, extentSize, slots, version)
 	if err != nil {
 		return nil, err
 	}
+	s.Tool = tool
 	// Clear the volume table and the lease region headers so stale data from
 	// a previous life of the LUN cannot be mistaken for records.
 	if err := dev.Zero(s.VolTableOff, s.TableSize()); err != nil {
 		return nil, err
+	}
+	if s.HasMailbox() {
+		if err := dev.Zero(s.MailboxOff, s.MailboxSize()); err != nil {
+			return nil, err
+		}
 	}
 	sb := s.encode()
 	if err := dev.WriteAt(0, sb); err != nil {
@@ -196,7 +208,7 @@ func allocate(used []bool, need uint64) ([]Run, error) {
 }
 
 func (p *Pool) writeRecord(t *Table, v *Volume) error {
-	b, err := v.encode()
+	b, err := v.encode(p.Super.Version)
 	if err != nil {
 		return err
 	}
@@ -222,18 +234,38 @@ func (t *Table) nextGen(slot uint32) uint64 {
 }
 
 // FreeSlot returns the first unused slot.
-func (t *Table) FreeSlot() (uint32, error) {
-	for i, v := range t.Vols {
-		if v == nil {
+func (t *Table) FreeSlot() (uint32, error) { return t.FreeSlotAfter(^uint32(0)) }
+
+// FreeSlotAfter returns the first unused slot above after (all of them when
+// after is the maximum value).
+func (t *Table) FreeSlotAfter(after uint32) (uint32, error) {
+	start := 0
+	if after != ^uint32(0) {
+		start = int(after) + 1
+	}
+	for i := start; i < len(t.Vols); i++ {
+		if t.Vols[i] == nil {
 			return uint32(i), nil
 		}
 	}
 	return 0, errors.New("no free volume slots")
 }
 
+// CreateOpts are the optional attributes of a new volume.
+type CreateOpts struct {
+	Format  uint32 // FormatRaw or FormatQcow2
+	Parent  *Volume
+	Creator uint32 // host id creating the volume
+}
+
 // Create allocates extents and writes an active record into slot. Caller
 // holds the metadata lease and has already initialized the slot's lease.
 func (p *Pool) Create(t *Table, slot uint32, name string, size uint64) (*Volume, error) {
+	return p.CreateWith(t, slot, name, size, CreateOpts{})
+}
+
+// CreateWith is Create with attributes.
+func (p *Pool) CreateWith(t *Table, slot uint32, name string, size uint64, o CreateOpts) (*Volume, error) {
 	if name == "" || len(name) >= NameLen {
 		return nil, fmt.Errorf("invalid name %q", name)
 	}
@@ -251,7 +283,14 @@ func (p *Pool) Create(t *Table, slot uint32, name string, size uint64) (*Volume,
 	if err != nil {
 		return nil, err
 	}
-	v := &Volume{Slot: uint32(slot), Gen: t.nextGen(uint32(slot)), State: StateActive, Name: name, Size: size, Created: time.Now().Unix(), Runs: runs}
+	v := &Volume{Slot: uint32(slot), Gen: t.nextGen(uint32(slot)), State: StateActive, Name: name, Size: size, Created: time.Now().Unix(), Runs: runs,
+		Format: o.Format, Creator: o.Creator}
+	if o.Parent != nil {
+		if t.Vols[o.Parent.Slot] == nil || t.Vols[o.Parent.Slot].Name != o.Parent.Name {
+			return nil, fmt.Errorf("parent %q is not in the table", o.Parent.Name)
+		}
+		v.Parent = o.Parent.Slot + 1
+	}
 	if _, err := rand.Read(v.UUID[:]); err != nil {
 		return nil, err
 	}
@@ -262,8 +301,42 @@ func (p *Pool) Create(t *Table, slot uint32, name string, size uint64) (*Volume,
 	return v, nil
 }
 
-// Delete marks a slot free by writing a superseding free record.
+// Children lists the active volumes backed by v.
+func (t *Table) Children(v *Volume) []*Volume {
+	var out []*Volume
+	for _, c := range t.Vols {
+		if c != nil && c.HasParent() && c.ParentSlot() == v.Slot {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Rename rewrites a record under a new name.
+func (p *Pool) Rename(t *Table, v *Volume, name string) (*Volume, error) {
+	if name == "" || len(name) >= NameLen {
+		return nil, fmt.Errorf("invalid name %q", name)
+	}
+	if t.Lookup(name) != nil {
+		return nil, fmt.Errorf("volume %q already exists", name)
+	}
+	nv := *v
+	nv.Runs = append([]Run(nil), v.Runs...)
+	nv.Name = name
+	nv.Gen = v.Gen + 1
+	if err := p.writeRecord(t, &nv); err != nil {
+		return nil, err
+	}
+	t.Vols[v.Slot] = &nv
+	return &nv, nil
+}
+
+// Delete marks a slot free by writing a superseding free record. A volume
+// that still backs others cannot go.
 func (p *Pool) Delete(t *Table, v *Volume) error {
+	if c := t.Children(v); len(c) > 0 {
+		return fmt.Errorf("%s is the backing volume of %s", v.Name, c[0].Name)
+	}
 	free := &Volume{Slot: v.Slot, Gen: v.Gen + 1, State: StateFree, Name: v.Name, UUID: v.UUID}
 	if err := p.writeRecord(t, free); err != nil {
 		return err

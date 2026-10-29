@@ -19,9 +19,13 @@ type Request struct {
 	Op      string   `json:"op"`
 	Name    string   `json:"name,omitempty"`
 	Size    uint64   `json:"size,omitempty"`
-	Mode    string   `json:"mode,omitempty"`    // "ex" or "sh"
-	Timeout int      `json:"timeout,omitempty"` // seconds
-	Names   []string `json:"names,omitempty"`   // prepare: volumes about to be activated shared
+	Mode    string   `json:"mode,omitempty"`     // "ex" or "sh"
+	Timeout int      `json:"timeout,omitempty"`  // seconds
+	Names   []string `json:"names,omitempty"`    // prepare: volumes about to be activated shared
+	Full    bool     `json:"full,omitempty"`     // check: also read every free slot's lease
+	Format  string   `json:"format,omitempty"`   // create: "raw" (default) or "qcow2"
+	Parent  string   `json:"parent,omitempty"`   // create: name of the backing volume
+	NewName string   `json:"new_name,omitempty"` // rename: the new name
 }
 
 // Response carries ok/error plus op-specific fields.

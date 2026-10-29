@@ -85,6 +85,11 @@ func (p *Pool) DMReload(v *Volume) error {
 	return dmsetup("", "resume", n)
 }
 
+// DMRename renames a mapped device; open handles keep working.
+func DMRename(oldName, newName string) error {
+	return dmsetup("", "rename", DMName(oldName), DMName(newName))
+}
+
 // DMRemove tears the device down. Fails if it is open.
 func DMRemove(name string) error {
 	if !DMExists(name) {
