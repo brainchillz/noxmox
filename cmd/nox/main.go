@@ -24,6 +24,7 @@ func usage() {
   nox format  --device DEV [--extent-size 256M] [--slots 1024] [--io-timeout 10] [--force]
   nox daemon  --device DEV --host-id N [--pool NAME] [--socket PATH]
   nox fence   --pool NAME                 sanlock killpath: stop guests using the pool (not called by hand)
+  nox pr-probe --device DEV [--host-id N] report whether the target supports persistent reservations
   every other command takes [--pool NAME] or [--socket PATH]
   nox status | list [--json]
   nox metrics                             prometheus text format
@@ -93,6 +94,13 @@ func main() {
 		fdry := fp.Bool("dry-run", false, "report what would be killed, do nothing")
 		_ = fp.Parse(args)
 		os.Exit(runFence(*fpool, *fdry))
+	}
+	if cmd == "pr-probe" {
+		fp := flag.NewFlagSet("pr-probe", flag.ExitOnError)
+		fdev := fp.String("device", "", "block device")
+		fhid := fp.Uint64("host-id", 1, "sanlock host id (for the test key)")
+		_ = fp.Parse(args)
+		os.Exit(runPRProbe(*fdev, *fhid))
 	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	device := fs.String("device", "", "shared block device")
