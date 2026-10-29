@@ -101,16 +101,11 @@ func Run(cfg Config) error {
 	if d.sock, err = sanlock.Register(); err != nil {
 		return err
 	}
-	// The daemon is the process sanlock holds the leases for, but the data
-	// path is the guests' QEMU processes. If sanlock could kill the daemon
-	// when renewals fail it would consider the host clean and disarm the
-	// watchdog while the guests keep their disks open. So sanlock may not
-	// signal the daemon; a host that cannot renew is reset by wdmd instead.
-	// systemd still stops the daemon with SIGTERM for restarts; its leases
-	// stay behind as orphans and are adopted by the next instance.
-	if err := sanlock.RestrictKillSignals(d.sock); err != nil {
-		return fmt.Errorf("sanlock restrict: %w", err)
-	}
+	// Use SIGTERM, not SIGKILL, if sanlock has to kill the daemon: it then
+	// exits cleanly and its leases persist as orphans. This alone does not
+	// make storage-loss fencing reliable; see RestrictSigkill and the
+	// fencing design note in the roadmap.
+	_ = sanlock.RestrictSigkill(d.sock)
 	lg.Printf("pool %s %s (format v%d) on %s, host id %d, lockspace %s, io_timeout %d", cfg.Pool, pool.Super.UUIDString(), pool.Super.Version, cfg.Device, cfg.HostID, d.ls.Name, d.ioTimeout())
 
 	_ = os.Remove(cfg.Socket)

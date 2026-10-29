@@ -156,26 +156,21 @@ func Register() (int, error) {
 	return int(rv), wrap("register", rv)
 }
 
-// RestrictSigkill asks sanlock to use SIGTERM only, never SIGKILL, when it
-// must kill this process for a lost lease.
+// RestrictSigkill asks sanlock to use SIGTERM, not SIGKILL, when it must
+// kill this process for a lost lease, so the daemon exits cleanly and its
+// leases persist as orphans.
+//
+// NOTE: this does NOT make a storage-loss fence reliable. sanlock fences a
+// host by killing the pids that hold its leases and, only if they will not
+// die, letting the watchdog reset the host. noxd holds the leases but the
+// data path is the guests' QEMU, so killing noxd lets sanlock call the host
+// clean and disarm the watchdog while the guests keep their disks mapped.
+// Restricting both signals does not help: sanlock then falls back to
+// SIGKILL rather than to nothing, and once noxd's hung I/O unwedges it is
+// reaped and the host never fences. The real fix is a sanlock killpath that
+// stops the guests, which is tracked as an open design item.
 func RestrictSigkill(sock int) error {
 	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_SIGKILL))
-}
-
-// RestrictKillSignals forbids sanlock from killing this process with either
-// SIGTERM or SIGKILL when a lease is lost. With no signal it is allowed to
-// use, sanlock can never clear the daemon's pids on a lockspace renewal
-// failure, so wdmd lets the watchdog reset the whole host. That is what we
-// want: the data-path writers are the guests' QEMU processes, not the
-// daemon, so clearing the daemon would let sanlock call the host clean and
-// disarm the watchdog while the guests keep writing. Resetting the host is
-// the only thing that stops them. systemd still stops the daemon with its
-// own SIGTERM for restarts; that is unaffected, and its leases persist as
-// orphans. SANLK_RESTRICT_ALL is deliberately not used: it refuses every
-// further command on the connection, including the acquires the daemon
-// makes on this same socket.
-func RestrictKillSignals(sock int) error {
-	return wrap("restrict", C.sanlock_restrict(C.int(sock), C.SANLK_RESTRICT_SIGKILL|C.SANLK_RESTRICT_SIGTERM))
 }
 
 // WriteLockspace initializes the delta-lease area on disk. maxHosts 0 means
