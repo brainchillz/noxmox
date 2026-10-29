@@ -13,12 +13,20 @@ it, VMs live on it, vMotion just works. That is VMFS, and Linux never had an
 equivalent.
 
 nox is that equivalent. Format one iSCSI or Fibre Channel LUN once, every node
-in the cluster opens it read-write, and each VM disk becomes a plain block
+that can see it opens it read-write, and each VM disk becomes a plain block
 device over fixed extents on the LUN. Ownership is decided by sanlock leases
 stored on the LUN itself, so a node that stops renewing gets fenced and its
 disks become available to the survivors, with no corosync, DLM, kernel module,
 or clustered filesystem involved. Proxmox sees it as an ordinary shared storage
 type: create, resize, clone, and live migrate from the UI.
+
+**The lock lives on the disk, not in the cluster.** Proxmox protects shared LVM
+with a lock held in its cluster filesystem, which means the protection only
+exists between nodes that are in the same cluster. Point two standalone nodes
+at the same LVM LUN and nothing stops them from starting the same VM twice and
+shredding its disk. With nox the lease is on the LUN, so the same pool can be
+shared safely by nodes in one cluster, in different clusters, or in no cluster
+at all. Two independent Proxmox boxes and one SAN LUN is a supported layout.
 
 ## What it does today
 
@@ -45,7 +53,7 @@ anything you love.
 
 | Option | What you give up |
 |---|---|
-| LVM on iSCSI (what Proxmox offers) | no snapshots, no thin, locking is a cluster-wide LVM lock, no fencing of a wedged node |
+| LVM on iSCSI (what Proxmox offers) | no snapshots, no thin, the lock lives in the cluster filesystem so standalone nodes get no protection at all, no fencing of a wedged node |
 | OCFS2 / GFS2 | a kernel filesystem, a DLM, corosync coupling, and a fencing stack to tune |
 | NFS or Ceph | a different storage protocol; your existing SAN stays idle |
 | nox | a Go daemon, a Perl plugin, and sanlock. Nothing in kernel space but device-mapper |
@@ -98,6 +106,27 @@ bitmap is derived from the table on every mutation, under the metadata lease.
   via a udev symlink `/dev/watchdog-soft`, and PVE's watchdog-mux is given
   the iTCO by loading it first. That leaves PVE HA self-fencing nominal on
   those nodes; use real hardware watchdogs or IPMI fencing in production.
+
+## Standalone nodes
+
+Nothing in nox talks to corosync or pmxcfs. Each node needs a unique host id in
+`/etc/default/noxd` and its own `pvesm add nox ...` entry, and that is all.
+Between nodes that are not clustered:
+
+- A VM whose disk is held by one node cannot be started on another. The second
+  start is refused within a second and names the holder.
+- Cold moves are a config file copy. Shut down on A, copy the guest config to B,
+  start it there. No disk copy; the lease moves with the start.
+- If a node dies, its leases expire about two minutes later and any other node
+  can start its guests. There is no quorum to reason about.
+- Live migration is a cluster feature of Proxmox and is not available. The
+  remote-migrate path between separate nodes copies the disk, which works but
+  duplicates the volume on the same LUN.
+
+Give each node a disjoint VMID range. Volume names are derived from the VMID,
+and two unrelated guests both numbered 100 would share a name prefix in the
+pool. Creation still picks free names, but a destroy with "purge unreferenced
+disks" on one node could remove the other node's volumes.
 
 ## Install on each PVE node
 
