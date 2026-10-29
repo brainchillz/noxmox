@@ -8,10 +8,10 @@ scenario_run() {
     # patterns are anchored so they never match the shell that runs them
     # throttle the memory copy so the kill lands mid-copy on any link
     # (a 2 GiB guest finishes in under ten seconds unthrottled)
-    s "$hip" "nohup qm migrate $VMID $target --online --bwlimit ${CHAOS_MIGRATE_BWLIMIT:-20480} > /tmp/chaos-migrate.log 2>&1 & echo \$! > /tmp/chaos-migrate.pid" 15
+    s "$hip" "nohup qm migrate $VMID $target --online --bwlimit ${CHAOS_MIGRATE_BWLIMIT:-5120} > /tmp/chaos-migrate.log 2>&1 & echo \$! > /tmp/chaos-migrate.pid" 15
     wait_until 120 "target qemu" s "$tip" "pgrep -f '^/usr/bin/kvm -id $VMID ' >/dev/null" 10 >/dev/null || { result migrate-abort FAIL "target-never-started"; return 1; }
-    wait_until 60 "memory copy to start" s "$hip" "grep -q 'migration status: active' /tmp/chaos-migrate.log" 10 >/dev/null
-    sleep 3
+    wait_until 60 "memory copy to start" s "$hip" "grep -q 'migration active' /tmp/chaos-migrate.log" 10 >/dev/null || { result migrate-abort FAIL "memory-copy-never-seen"; return 1; }
+    sleep 2
     s "$tip" "pkill -9 -f '^/usr/bin/kvm -id $VMID '; echo killed" 15
     wait_until 300 "migrate command to finish" s "$hip" "! kill -0 \$(cat /tmp/chaos-migrate.pid) 2>/dev/null" 10 >/dev/null
     log "migrate log: $(s "$hip" "grep -E 'ERROR|failed|aborted' /tmp/chaos-migrate.log | tail -2" 10)"
