@@ -17,6 +17,7 @@ use warnings;
 use IO::Socket::UNIX;
 use JSON::PP;
 
+use PVE::INotify;
 use PVE::Tools qw(run_command);
 use PVE::Storage::Plugin;
 use PVE::Storage::Common;
@@ -108,6 +109,15 @@ sub properties {
             type => 'string',
             optional => 1,
         },
+        'allow-foreign-delete' => {
+            description => "Allow deleting volumes that were created by another host and are not"
+                . " referenced by a guest on this node. Off by default: on a pool shared by"
+                . " unrelated nodes, 'purge unreferenced disks' would otherwise remove another"
+                . " node's volumes that happen to carry the same VMID.",
+            type => 'boolean',
+            optional => 1,
+            default => 0,
+        },
     };
 }
 
@@ -115,6 +125,7 @@ sub options {
     return {
         pool => { optional => 1 },
         'nox-socket' => { optional => 1 },
+        'allow-foreign-delete' => { optional => 1 },
         nodes => { optional => 1 },
         shared => { optional => 1 },
         disable => { optional => 1 },
@@ -313,10 +324,32 @@ sub alloc_image {
     return $name;
 }
 
+# Guests on unrelated nodes may share a VMID. A volume this node did not
+# create and no guest on this node references is most likely another node's
+# disk; refuse to remove it unless the storage says foreign deletes are fine.
+my sub assert_deletable {
+    my ($storeid, $scfg, $name, $vmid) = @_;
+
+    return if $scfg->{'allow-foreign-delete'};
+    my $v = nox_info($scfg, $name);
+    my $me = nox_call($scfg, { op => 'status' }, 10)->{host_id};
+    return if !$v->{creator} || !$me || $v->{creator} == $me;
+    my $node = PVE::INotify::nodename();
+    for my $conf ("/etc/pve/nodes/$node/qemu-server/$vmid.conf", "/etc/pve/nodes/$node/lxc/$vmid.conf") {
+        next if !-e $conf;
+        my $text = PVE::Tools::file_get_contents($conf);
+        return if $text =~ m/\Q$storeid:$name\E(?:[,\s]|$)/;
+    }
+    die "refusing to delete $storeid:$name: created by host $v->{creator}, not by this node (host $me),"
+        . " and no guest $vmid on this node references it. Set allow-foreign-delete on the storage"
+        . " if this pool is shared only within one cluster.\n";
+}
+
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase, $format) = @_;
 
-    my ($vtype, $name) = $class->parse_volname($volname);
+    my ($vtype, $name, $vmid) = $class->parse_volname($volname);
+    assert_deletable($storeid, $scfg, $name, $vmid);
     my $names = [$name];
     if ($format eq 'qcow2') {
         # top first, then its snapshots down the chain: a backing volume can
