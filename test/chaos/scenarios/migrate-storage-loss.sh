@@ -54,8 +54,15 @@ scenario_run() {
     # make sure the guest can run somewhere again
     local cfgnode; for n in $(node_names); do s "$(node_ip "$n")" "test -e /etc/pve/nodes/$n/qemu-server/$VMID.conf" 15 && cfgnode=$n; done
     if [ -n "${cfgnode:-}" ]; then
-        s "$(node_ip "$cfgnode")" "qm status $VMID | grep -q running || qm start $VMID" 400 | tail -1
-        agent_wait "$(node_ip "$cfgnode")" >/dev/null || { verdict=FAIL; reason+="guest-not-up "; }
+        local cip; cip=$(node_ip "$cfgnode")
+        wait_until 180 "noxd ready on $cfgnode" sh -c "ssh -o BatchMode=yes root@$cip 'nox status 2>/dev/null' | grep -q 'ready true'" >/dev/null || true
+        local started=
+        for try in 1 2 3; do
+            s "$cip" "qm status $VMID | grep -q running || qm start $VMID" 400 >/dev/null 2>&1
+            s "$cip" "qm status $VMID 2>/dev/null | grep -q running" 15 && { started=1; break; }
+            sleep 10
+        done
+        if [ -n "$started" ] && agent_wait "$cip" >/dev/null; then :; else verdict=FAIL; reason+="guest-not-up "; fi
     fi
     result migrate-storage-loss "$verdict" "source=$down srcq=$srcq dstq=$dstq $reason"
     [ "$verdict" = PASS ]
