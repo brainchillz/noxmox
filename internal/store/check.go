@@ -159,3 +159,38 @@ func allZero(b []byte) bool {
 	}
 	return true
 }
+
+// RepairCopies rewrites, for every slot that has exactly one valid copy
+// and one unreadable non-zero copy, the bad copy with the good record, so
+// the next torn write cannot leave the slot without a valid copy. Caller
+// holds the metadata lease. Returns the slots repaired.
+func (p *Pool) RepairCopies() ([]uint32, error) {
+	raw, err := p.Dev.ReadAt(p.Super.VolTableOff, int(p.Super.TableSize()))
+	if err != nil {
+		return nil, err
+	}
+	var fixed []uint32
+	for slot := uint32(0); slot < p.Super.Slots; slot++ {
+		base := int(slot) * 2 * RecSize
+		ca, cb := raw[base:base+RecSize], raw[base+RecSize:base+2*RecSize]
+		a, okA := decodeVolume(ca)
+		b, okB := decodeVolume(cb)
+		okA = okA && a.Slot == slot
+		okB = okB && b.Slot == slot
+		var good []byte
+		var bad int
+		switch {
+		case okA && !okB && !allZero(cb):
+			good, bad = ca, 1
+		case okB && !okA && !allZero(ca):
+			good, bad = cb, 0
+		default:
+			continue
+		}
+		if err := p.Dev.WriteAt(p.Super.RecOff(slot, bad), good); err != nil {
+			return fixed, err
+		}
+		fixed = append(fixed, slot)
+	}
+	return fixed, nil
+}

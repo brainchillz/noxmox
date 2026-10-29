@@ -182,3 +182,38 @@ func FuzzDecodeMailbox(f *testing.F) {
 		}
 	})
 }
+
+func TestRepairCopies(t *testing.T) {
+	dev := tmpDevice(t, 4<<30)
+	p, err := Format(dev, 16*MiB, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb, _ := p.ReadTable()
+	v, err := p.Create(tb, 2, "vm-1-disk-0", 32*MiB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// damage the unused copy with garbage: one valid copy left
+	junk := make([]byte, RecSize)
+	for i := range junk {
+		junk[i] = 0xA5
+	}
+	if err := dev.WriteAt(p.Super.RecOff(2, 1), junk); err != nil {
+		t.Fatal(err)
+	}
+	if probs, _ := p.Check(); len(probs) != 0 {
+		t.Fatalf("one valid copy must pass check: %v", probs)
+	}
+	fixed, err := p.RepairCopies()
+	if err != nil || len(fixed) != 1 || fixed[0] != 2 {
+		t.Fatalf("repair: %v %v", fixed, err)
+	}
+	raw, _ := dev.ReadAt(p.Super.RecOff(2, 1), RecSize)
+	if r, ok := decodeVolume(raw); !ok || r.Name != v.Name || r.Gen != v.Gen {
+		t.Fatal("bad copy not restored")
+	}
+	if fixed, _ = p.RepairCopies(); len(fixed) != 0 {
+		t.Fatal("repair is not idempotent")
+	}
+}

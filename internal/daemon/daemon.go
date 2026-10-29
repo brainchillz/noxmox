@@ -539,6 +539,8 @@ func (d *Daemon) dispatch(req proto.Request, resp proto.Response) error {
 		return nil
 	case "check":
 		return d.check(req.Full, resp)
+	case "repair":
+		return d.repair(resp)
 	}
 	return fmt.Errorf("unknown op %q", req.Op)
 }
@@ -1337,4 +1339,53 @@ func (d *Daemon) check(full bool, resp proto.Response) error {
 	resp["problems"] = problems
 	resp["clean"] = len(problems) == 0
 	return nil
+}
+
+// repair does only what is provably safe: drops mapped devices and leases
+// this host holds for volumes that no longer exist, and restores the bad
+// copy of any record that has exactly one valid copy. Anything else is
+// reported by check and left to the administrator.
+func (d *Daemon) repair(resp proto.Response) error {
+	actions := []string{}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.withMeta(func(t *store.Table) error {
+		for name, h := range d.held {
+			if v := t.Lookup(name); v != nil && v.UUID == h.vol.UUID {
+				continue
+			}
+			if store.DMExists(name) {
+				if err := store.DMRemove(name); err != nil {
+					actions = append(actions, fmt.Sprintf("%s: no record but still open here, left alone (%v)", name, err))
+					continue
+				}
+			}
+			_ = sanlock.Release(d.sock, d.res(h.vol.Slot))
+			delete(d.held, name)
+			actions = append(actions, fmt.Sprintf("%s: released lease of slot %d and removed its device (record gone)", name, h.vol.Slot))
+		}
+		names, _ := store.DMList()
+		for _, n := range names {
+			if _, ok := d.held[n]; ok || t.Lookup(n) != nil {
+				continue
+			}
+			if err := store.DMRemove(n); err == nil {
+				actions = append(actions, fmt.Sprintf("%s: removed stale device with no record", n))
+			} else {
+				actions = append(actions, fmt.Sprintf("%s: stale device still open, left alone", n))
+			}
+		}
+		fixed, err := d.pool.RepairCopies()
+		for _, s := range fixed {
+			actions = append(actions, fmt.Sprintf("slot %d: rewrote the unreadable copy from the valid one", s))
+		}
+		if err != nil {
+			return err
+		}
+		for _, a := range actions {
+			d.lg.Printf("repair: %s", a)
+		}
+		resp["actions"] = actions
+		return nil
+	})
 }

@@ -35,6 +35,7 @@ func usage() {
   nox convert NAME ex|sh
   nox rename NAME NEWNAME
   nox check [--full] [--json]             table consistency and lease holders
+  nox repair                              drop stale devices and leases, restore damaged record copies
   nox upgrade                             move a format v1 pool to v2 (all volumes inactive)
   nox version`)
 	os.Exit(2)
@@ -278,6 +279,15 @@ func main() {
 		fmt.Println(call(proto.Request{Op: "path", Name: pos[0]}, 10*time.Second)["path"])
 	case "metrics":
 		fmt.Print(call(proto.Request{Op: "metrics"}, 30*time.Second)["text"])
+	case "repair":
+		r := call(proto.Request{Op: "repair"}, 10*time.Minute)
+		acts, _ := r["actions"].([]any)
+		for _, a := range acts {
+			fmt.Println(a)
+		}
+		if len(acts) == 0 {
+			fmt.Println("nothing to repair")
+		}
 	case "check":
 		r := call(proto.Request{Op: "check", Full: *full}, 10*time.Minute)
 		if *asJSON {
