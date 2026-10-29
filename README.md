@@ -136,9 +136,26 @@ on their own.
   from hard reset to the survivor acquiring on this hardware (io_timeout 10)
   when the host stays down. A host that reboots and rejoins sooner gets a
   new lockspace generation, and sanlock frees the leases of its previous
-  life at once: the chaos suite measured 56 s with a 55 s reboot. A node
-  whose sanlock stops renewing is reset by wdmd and softdog 123 s after
-  the last renewal, before any peer can take its leases.
+  life at once: the chaos suite measured 56 s with a 55 s reboot.
+- Fencing is reliable when the node itself stops: a hard crash, or sanlock
+  unable to run (frozen or dead), means it cannot pet the watchdog and wdmd
+  resets it 123 s after the last renewal, before any peer acquires. Both
+  are verified in the chaos suite.
+
+**Known gap: losing only the storage path, with sanlock still running, is
+not yet fenced reliably.** sanlock fences a host by killing the processes
+that hold its leases and, only if they will not die, letting the watchdog
+reset the host. noxd holds the leases, but the data path is the guests'
+QEMU processes. When a node loses its path to the LUN while sanlock keeps
+running, sanlock kills noxd, sees no lease holders left, and can disarm the
+watchdog without resetting the host, while the guest still has its disk
+mapped. If that LUN later comes back to the old node after a survivor took
+over, both could write it. The chaos suite caught this: some path-loss runs
+fenced (noxd was stuck in uninterruptible I/O and could not be reaped),
+one did not. The fix is a sanlock killpath that stops the guests when a
+lease is lost, the same mechanism libvirt uses; it is designed, not built.
+Until then, treat path-loss fencing on a live node as best-effort and give
+the nodes a hardware watchdog with a short, independent timeout.
 - Fencing is wdmd on a kernel watchdog device. On the lab's HP EliteDesk
   800 G6 the iTCO timer loads but never resets the machine (tested by
   opening it and not petting it for four minutes), so wdmd uses softdog
