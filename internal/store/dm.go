@@ -9,8 +9,19 @@ import (
 	"time"
 )
 
+// DefaultDMPrefix is the device-mapper name prefix of the default pool.
+const DefaultDMPrefix = "nox-"
+
+// dmPrefix is the prefix used by the package level helpers; a daemon
+// serving a pool with another name sets it through SetDMPrefix. One daemon
+// serves one pool, so a process wide setting is enough.
+var dmPrefix = DefaultDMPrefix
+
+// SetDMPrefix changes the device-mapper name prefix for this process.
+func SetDMPrefix(p string) { dmPrefix = p }
+
 // DMName is the device-mapper name for a volume.
-func DMName(name string) string { return "nox-" + name }
+func DMName(name string) string { return dmPrefix + name }
 
 // DMPath is the block device path QEMU opens.
 func DMPath(name string) string { return "/dev/mapper/" + DMName(name) }
@@ -107,8 +118,8 @@ func DMList() ([]string, error) {
 	var names []string
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
-		if len(f) > 0 && strings.HasPrefix(f[0], "nox-") {
-			names = append(names, strings.TrimPrefix(f[0], "nox-"))
+		if len(f) > 0 && strings.HasPrefix(f[0], dmPrefix) {
+			names = append(names, strings.TrimPrefix(f[0], dmPrefix))
 		}
 	}
 	return names, nil

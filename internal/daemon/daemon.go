@@ -35,6 +35,7 @@ var Version = "dev"
 type Config struct {
 	Device    string
 	HostID    uint64
+	Pool      string // pool name: selects the socket and the dm name prefix
 	Socket    string
 	IOTimeout int
 }
@@ -44,6 +45,13 @@ type held struct {
 	mode        int
 	sharedUntil time.Time // no self-upgrade before this (migration window)
 	backing     bool      // held shared because a chain on top of it is active here; never upgraded
+	since       time.Time
+}
+
+type stats struct {
+	activations uint64
+	mailHandled uint64
+	lastHandoff time.Duration
 }
 
 // Daemon state.
@@ -59,6 +67,7 @@ type Daemon struct {
 	seen     map[sanlock.Event]time.Time // recently handled events (sanlock redelivers each renewal)
 	mailSeen map[[2]uint64]time.Time     // (sender, seq) of handled mailbox requests
 	mailSeq  uint64
+	stats    stats
 	ready    atomic.Bool
 	lg       *log.Logger
 }
@@ -66,6 +75,16 @@ type Daemon struct {
 // Run starts the daemon and blocks until the listener fails.
 func Run(cfg Config) error {
 	lg := log.New(os.Stderr, "", log.LstdFlags|log.Lmsgprefix)
+	if cfg.Pool == "" {
+		cfg.Pool = proto.DefaultPool
+	}
+	if strings.ContainsAny(cfg.Pool, "/ \t") {
+		return fmt.Errorf("bad pool name %q", cfg.Pool)
+	}
+	if cfg.Socket == "" {
+		cfg.Socket = proto.SocketPath(cfg.Pool)
+	}
+	store.SetDMPrefix(cfg.Pool + "-")
 	dev, err := store.OpenDevice(cfg.Device)
 	if err != nil {
 		return err
@@ -83,7 +102,7 @@ func Run(cfg Config) error {
 		return err
 	}
 	_ = sanlock.RestrictSigkill(d.sock)
-	lg.Printf("pool %s (format v%d) on %s, host id %d, lockspace %s, io_timeout %d", pool.Super.UUIDString(), pool.Super.Version, cfg.Device, cfg.HostID, d.ls.Name, d.ioTimeout())
+	lg.Printf("pool %s %s (format v%d) on %s, host id %d, lockspace %s, io_timeout %d", cfg.Pool, pool.Super.UUIDString(), pool.Super.Version, cfg.Device, cfg.HostID, d.ls.Name, d.ioTimeout())
 
 	_ = os.Remove(cfg.Socket)
 	l, err := net.Listen("unix", cfg.Socket)
@@ -91,6 +110,11 @@ func Run(cfg Config) error {
 		return err
 	}
 	_ = os.Chmod(cfg.Socket, 0o600)
+	if cfg.Pool == proto.DefaultPool && cfg.Socket == proto.SocketPath(cfg.Pool) {
+		// keep the pre pool-name socket path working
+		_ = os.Remove(proto.DefaultSocket)
+		_ = os.Symlink(cfg.Socket, proto.DefaultSocket)
+	}
 
 	go d.join()
 	for {
@@ -263,7 +287,7 @@ func (d *Daemon) adopt() {
 		for attempt := 0; attempt < 10 && d.held[n] == nil; attempt++ {
 			for _, mode := range []int{sanlock.Exclusive, sanlock.Shared} {
 				if err := sanlock.Adopt(d.sock, r, mode); err == nil {
-					d.held[n] = &held{vol: v, mode: mode, backing: backing}
+					d.held[n] = &held{vol: v, mode: mode, backing: backing, since: time.Now()}
 					d.lg.Printf("adopted orphan lease for %s (%s)", n, modeName(mode))
 					break
 				} else if !errors.Is(err, sanlock.ErrNoOrphan) {
@@ -274,7 +298,7 @@ func (d *Daemon) adopt() {
 				break
 			}
 			if err := sanlock.Acquire(d.sock, r, sanlock.Exclusive, true); err == nil {
-				d.held[n] = &held{vol: v, mode: sanlock.Exclusive, backing: backing}
+				d.held[n] = &held{vol: v, mode: sanlock.Exclusive, backing: backing, since: time.Now()}
 				d.lg.Printf("re-acquired lease for %s (was not orphaned)", n)
 				break
 			} else {
@@ -380,6 +404,7 @@ func (d *Daemon) shareRequest(from uint64, op uint32, arg uint64) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.stats.mailHandled++
 	n := 0
 	for name, h := range d.held {
 		if !match(h) {
@@ -477,8 +502,11 @@ func (d *Daemon) serve(c net.Conn) {
 }
 
 func (d *Daemon) dispatch(req proto.Request, resp proto.Response) error {
-	if req.Op == "status" {
+	switch req.Op {
+	case "status":
 		return d.status(resp)
+	case "metrics":
+		return d.metrics(resp)
 	}
 	if !d.ready.Load() {
 		return errors.New("lockspace not joined yet")
@@ -495,13 +523,13 @@ func (d *Daemon) dispatch(req proto.Request, resp proto.Response) error {
 	case "upgrade":
 		return d.upgrade(resp)
 	case "delete":
-		return d.delete(req.Name)
+		return d.delete(req.Name, req.Reparent)
 	case "activate":
 		return d.activate(req, resp)
 	case "deactivate":
 		return d.deactivate(req.Name)
 	case "resize":
-		return d.resize(req.Name, req.Size, resp)
+		return d.resize(req.Name, req.Size, req.VirtSize, resp)
 	case "convert":
 		return d.convert(req.Name, req.Mode, resp)
 	case "prepare":
@@ -518,14 +546,80 @@ func (d *Daemon) dispatch(req proto.Request, resp proto.Response) error {
 func (d *Daemon) heldInfo() []map[string]any {
 	var out []map[string]any
 	for n, h := range d.held {
-		out = append(out, map[string]any{"name": n, "slot": h.vol.Slot, "mode": modeName(h.mode), "backing": h.backing})
+		m := map[string]any{"name": n, "slot": h.vol.Slot, "mode": modeName(h.mode), "backing": h.backing}
+		if !h.since.IsZero() {
+			m["held_seconds"] = int(time.Since(h.since).Seconds())
+		}
+		out = append(out, m)
 	}
 	return out
+}
+
+// metrics renders the daemon's state in the Prometheus text format, for a
+// node exporter textfile collector or a scrape through a small proxy.
+func (d *Daemon) metrics(resp proto.Response) error {
+	var b strings.Builder
+	g := func(name, help, typ string, labels string, v any) {
+		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n%s%s %v\n", name, help, name, typ, name, labels, v)
+	}
+	s := d.pool.Super
+	pl := fmt.Sprintf(`{pool="%s"}`, d.cfg.Pool)
+	ready := 0
+	if d.ready.Load() {
+		ready = 1
+	}
+	g("nox_ready", "1 when the lockspace is joined", "gauge", pl, ready)
+	g("nox_format_version", "on-disk format version", "gauge", pl, s.Version)
+	g("nox_host_id", "this host's sanlock host id", "gauge", pl, d.cfg.HostID)
+	total := s.DataExtents * s.ExtentSize
+	g("nox_pool_bytes_total", "data capacity", "gauge", pl, total)
+	if t, err := d.pool.ReadTable(); err == nil {
+		free := t.FreeExtents(s.DataExtents) * s.ExtentSize
+		g("nox_pool_bytes_free", "unallocated data bytes", "gauge", pl, free)
+		g("nox_volumes", "active volume records", "gauge", pl, len(t.Active()))
+	}
+	d.mu.Lock()
+	ex, sh, back := 0, 0, 0
+	for _, h := range d.held {
+		switch {
+		case h.backing:
+			back++
+		case h.mode == sanlock.Shared:
+			sh++
+		default:
+			ex++
+		}
+	}
+	act, mail, hand := d.stats.activations, d.stats.mailHandled, d.stats.lastHandoff
+	d.mu.Unlock()
+	fmt.Fprintf(&b, "# HELP nox_leases_held leases this host holds\n# TYPE nox_leases_held gauge\n")
+	fmt.Fprintf(&b, "nox_leases_held{pool=%q,mode=\"ex\"} %d\nnox_leases_held{pool=%q,mode=\"sh\"} %d\nnox_leases_held{pool=%q,mode=\"backing\"} %d\n", d.cfg.Pool, ex, d.cfg.Pool, sh, d.cfg.Pool, back)
+	g("nox_activations_total", "volume activations since start", "counter", pl, act)
+	g("nox_share_requests_handled_total", "convert-to-shared requests from peers handled", "counter", pl, mail)
+	g("nox_last_handoff_seconds", "duration of the last shared lease wait", "gauge", pl, hand.Seconds())
+	if d.ready.Load() {
+		if hosts, err := sanlock.Hosts(d.ls.Name, 0); err == nil {
+			live, dead := 0, 0
+			for _, h := range hosts {
+				switch sanlock.HostState(h) {
+				case sanlock.HostLive:
+					live++
+				case sanlock.HostDead, sanlock.HostFail:
+					dead++
+				}
+			}
+			fmt.Fprintf(&b, "# HELP nox_hosts hosts seen in the lockspace\n# TYPE nox_hosts gauge\nnox_hosts{pool=%q,state=\"live\"} %d\nnox_hosts{pool=%q,state=\"dead\"} %d\n", d.cfg.Pool, live, d.cfg.Pool, dead)
+		}
+	}
+	resp["text"] = b.String()
+	return nil
 }
 
 func (d *Daemon) status(resp proto.Response) error {
 	s := d.pool.Super
 	resp["device"] = d.cfg.Device
+	resp["pool"] = d.cfg.Pool
+	resp["version"] = Version
 	resp["uuid"] = s.UUIDString()
 	resp["lockspace"] = d.ls.Name
 	resp["host_id"] = d.cfg.HostID
@@ -561,10 +655,13 @@ func (d *Daemon) status(resp proto.Response) error {
 	return nil
 }
 
-func (d *Daemon) volInfo(v *store.Volume) map[string]any {
-	m := map[string]any{"name": v.Name, "slot": v.Slot, "size": v.Size, "created": v.Created, "extents": v.Extents(), "runs": v.Runs, "gen": v.Gen, "format": v.FormatName(), "creator": v.Creator}
+func (d *Daemon) volInfo(t *store.Table, v *store.Volume) map[string]any {
+	m := map[string]any{"name": v.Name, "slot": v.Slot, "size": v.Size, "virt_size": v.GuestSize(), "created": v.Created, "extents": v.Extents(), "runs": v.Runs, "gen": v.Gen, "format": v.FormatName(), "creator": v.Creator}
 	if v.HasParent() {
 		m["parent_slot"] = v.ParentSlot()
+		if t != nil && v.ParentSlot() < uint32(len(t.Vols)) && t.Vols[v.ParentSlot()] != nil {
+			m["parent"] = t.Vols[v.ParentSlot()].Name
+		}
 	}
 	if h, ok := d.held[v.Name]; ok {
 		m["mode"] = modeName(h.mode)
@@ -582,7 +679,7 @@ func (d *Daemon) list(resp proto.Response) error {
 	defer d.mu.Unlock()
 	vols := []map[string]any{}
 	for _, v := range t.Active() {
-		vols = append(vols, d.volInfo(v))
+		vols = append(vols, d.volInfo(t, v))
 	}
 	resp["volumes"] = vols
 	return nil
@@ -599,13 +696,13 @@ func (d *Daemon) info(name string, resp proto.Response) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	resp["volume"] = d.volInfo(v)
+	resp["volume"] = d.volInfo(t, v)
 	return nil
 }
 
 func (d *Daemon) create(req proto.Request, resp proto.Response) error {
 	name, size := req.Name, req.Size
-	opts := store.CreateOpts{Creator: uint32(d.cfg.HostID)}
+	opts := store.CreateOpts{Creator: uint32(d.cfg.HostID), VirtSize: req.VirtSize}
 	switch req.Format {
 	case "", "raw":
 	case "qcow2":
@@ -649,7 +746,7 @@ func (d *Daemon) create(req proto.Request, resp proto.Response) error {
 		if err != nil {
 			return err
 		}
-		resp["volume"] = d.volInfo(v)
+		resp["volume"] = d.volInfo(t, v)
 		d.lg.Printf("created %s slot %d size %d %s runs %v", name, slot, size, v.FormatName(), v.Runs)
 		return nil
 	})
@@ -693,7 +790,7 @@ func (d *Daemon) rename(name, newName string, resp proto.Response) error {
 			delete(d.held, name)
 			d.held[newName] = h
 		}
-		resp["volume"] = d.volInfo(nv)
+		resp["volume"] = d.volInfo(t, nv)
 		d.lg.Printf("renamed %s to %s", name, newName)
 		return nil
 	})
@@ -743,11 +840,15 @@ func (d *Daemon) upgrade(resp proto.Response) error {
 	})
 }
 
-func (d *Daemon) delete(name string) error {
+func (d *Daemon) delete(name string, reparent bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if store.DMExists(name) {
-		return fmt.Errorf("%s is active on this host", name)
+		// A chain member qemu has just detached is still mapped here; it
+		// goes if nothing has it open.
+		if err := store.DMRemove(name); err != nil {
+			return fmt.Errorf("%s is active on this host", name)
+		}
 	}
 	if h, ok := d.held[name]; ok {
 		_ = sanlock.Release(d.sock, d.res(h.vol.Slot))
@@ -778,7 +879,11 @@ func (d *Daemon) delete(name string) error {
 		if v == nil {
 			return store.ErrNotFound
 		}
-		if err := d.pool.Delete(t, v); err != nil {
+		if reparent {
+			if err := d.pool.DeleteFromChain(t, v); err != nil {
+				return err
+			}
+		} else if err := d.pool.Delete(t, v); err != nil {
 			return err
 		}
 		d.lg.Printf("deleted %s slot %d", name, v.Slot)
@@ -896,8 +1001,13 @@ func (d *Daemon) activate(req proto.Request, resp proto.Response) error {
 		_ = sanlock.Release(d.sock, r)
 		return err
 	}
+	h.since = time.Now()
 	d.mu.Lock()
 	d.held[req.Name] = h
+	d.stats.activations++
+	if mode == sanlock.Shared && !lastAsk.IsZero() {
+		d.stats.lastHandoff = time.Since(t0)
+	}
 	err = d.activateChain(v)
 	d.mu.Unlock()
 	if err != nil {
@@ -941,7 +1051,7 @@ func (d *Daemon) activateChain(v *store.Volume) error {
 			if err := sanlock.Acquire(d.sock, d.res(p.Slot), sanlock.Shared, true); err != nil {
 				return fmt.Errorf("%s: acquire backing %s shared: %w", v.Name, p.Name, err)
 			}
-			d.held[p.Name] = &held{vol: p, mode: sanlock.Shared, backing: true}
+			d.held[p.Name] = &held{vol: p, mode: sanlock.Shared, backing: true, since: time.Now()}
 		}
 		if err := d.pool.DMCreate(p); err != nil {
 			return err
@@ -1111,7 +1221,7 @@ func (d *Daemon) deactivate(name string) error {
 	return nil
 }
 
-func (d *Daemon) resize(name string, size uint64, resp proto.Response) error {
+func (d *Daemon) resize(name string, size uint64, virtSize uint64, resp proto.Response) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	h, isHeld := d.held[name]
@@ -1134,7 +1244,7 @@ func (d *Daemon) resize(name string, size uint64, resp proto.Response) error {
 			}
 			defer func() { _ = sanlock.Release(d.sock, r) }()
 		}
-		nv, err := d.pool.Grow(t, v, size)
+		nv, err := d.pool.GrowTo(t, v, size, virtSize)
 		if err != nil {
 			return err
 		}
@@ -1146,7 +1256,7 @@ func (d *Daemon) resize(name string, size uint64, resp proto.Response) error {
 				}
 			}
 		}
-		resp["volume"] = d.volInfo(nv)
+		resp["volume"] = d.volInfo(t, nv)
 		d.lg.Printf("resized %s to %d", name, size)
 		return nil
 	})

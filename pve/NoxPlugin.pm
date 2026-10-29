@@ -23,15 +23,14 @@ use PVE::Storage::Common;
 
 use base qw(PVE::Storage::Plugin);
 
-my $DEFAULT_SOCKET = '/run/noxd.sock';
-my $DM_PREFIX = 'nox-';
+my $DEFAULT_POOL = 'nox';
 
 # ---- daemon protocol -------------------------------------------------------
 
 my sub nox_call {
     my ($scfg, $req, $timeout) = @_;
 
-    my $path = $scfg->{'nox-socket'} // $DEFAULT_SOCKET;
+    my $path = $scfg->{'nox-socket'} // ('/run/noxd-' . ($scfg->{pool} // $DEFAULT_POOL) . '.sock');
     $timeout //= 60;
 
     my $resp;
@@ -62,9 +61,15 @@ my sub nox_info {
     return nox_call($scfg, { op => 'info', name => $name }, $timeout // 30)->{volume};
 }
 
+# Device-mapper names carry the pool name as prefix, like LVM's vg-lv.
+my sub dm_prefix {
+    my ($scfg) = @_;
+    return ($scfg->{pool} // $DEFAULT_POOL) . '-';
+}
+
 my sub dm_path {
-    my ($name) = @_;
-    return "/dev/mapper/$DM_PREFIX$name";
+    my ($scfg, $name) = @_;
+    return '/dev/mapper/' . dm_prefix($scfg) . $name;
 }
 
 # ---- plugin identity -------------------------------------------------------
@@ -92,8 +97,14 @@ sub get_formats {
 
 sub properties {
     return {
+        pool => {
+            description => "Name of the nox pool (the daemon instance) on each node.",
+            type => 'string',
+            format => 'pve-storage-id',
+            optional => 1,
+        },
         'nox-socket' => {
-            description => "Control socket of the noxd daemon on each node.",
+            description => "Control socket of the noxd daemon on each node (default /run/noxd-<pool>.sock).",
             type => 'string',
             optional => 1,
         },
@@ -102,6 +113,7 @@ sub properties {
 
 sub options {
     return {
+        pool => { optional => 1 },
         'nox-socket' => { optional => 1 },
         nodes => { optional => 1 },
         shared => { optional => 1 },
@@ -166,7 +178,7 @@ sub filesystem_path {
     my ($vtype, $name, $vmid, undef, undef, undef, $format) = $class->parse_volname($volname);
     die "snapshots need the qcow2 format\n" if defined($snapname) && $format ne 'qcow2';
     $name = get_snap_name($class, $volname, $snapname) if $snapname;
-    my $path = dm_path($name);
+    my $path = dm_path($scfg, $name);
     return wantarray ? ($path, $vmid, $vtype) : $path;
 }
 
@@ -256,12 +268,12 @@ my sub nox_alloc {
 
     eval {
         $class->activate_volume($storeid, $scfg, $name);
-        my $path = dm_path($name);
+        my $path = dm_path($scfg, $name);
         my $options = { preallocation => PVE::Storage::Plugin::preallocation_cmd_opt($scfg, $fmt) };
         if (defined($backing)) {
             # relative to /dev/mapper, where the top image lives
             PVE::Storage::Common::qemu_img_create_qcow2_backed(
-                $path, $DM_PREFIX . $backing, $backing_fmt // 'qcow2', $options,
+                $path, dm_prefix($scfg) . $backing, $backing_fmt // 'qcow2', $options,
             );
         } else {
             PVE::Storage::Common::qemu_img_create($fmt, $size_kib, $path, $options);
@@ -380,7 +392,7 @@ sub volume_resize {
         my $was_active = defined($v->{mode});
         $class->activate_volume($storeid, $scfg, $volname, $snapname);
         my $preallocation = PVE::Storage::Plugin::preallocation_cmd_opt($scfg, $format);
-        eval { PVE::Storage::Common::qemu_img_resize(dm_path($name), $format, $size, $preallocation, 10) };
+        eval { PVE::Storage::Common::qemu_img_resize(dm_path($scfg, $name), $format, $size, $preallocation, 10) };
         my $err = $@;
         $class->deactivate_volume($storeid, $scfg, $volname, $snapname) if !$was_active;
         die $err if $err;
@@ -472,7 +484,7 @@ sub volume_snapshot_info {
         last if !$snapname;    # a base image or a foreign chain member ends the list
         $info->{$snapname} = {
             order => $order++,
-            file => dm_path($cur->{name}),
+            file => dm_path($scfg, $cur->{name}),
             volname => $cur->{name},
             volid => "$storeid:$cur->{name}",
             'virtual-size' => $cur->{virt_size} // $cur->{size},
@@ -589,7 +601,7 @@ sub volume_snapshot_delete {
             my $parentvol = $snapshots->{$parentsnap}->{volname};
             print "$volname: deleting snapshot '$snap' by rebasing '$childsnap' onto '$parentsnap'\n";
             run_command(
-                ['/usr/bin/qemu-img', 'rebase', '-b', $DM_PREFIX . $parentvol, '-F', 'qcow2', '-f', 'qcow2', $childpath],
+                ['/usr/bin/qemu-img', 'rebase', '-b', dm_prefix($scfg) . $parentvol, '-F', 'qcow2', '-f', 'qcow2', $childpath],
                 errmsg => "qemu-img rebase $childpath failed",
             );
             eval { nox_call($scfg, { op => 'deactivate', name => $snapvol }, 60) };

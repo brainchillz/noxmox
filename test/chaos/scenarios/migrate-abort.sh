@@ -16,9 +16,9 @@ scenario_run() {
     agent_wait "$hip" >/dev/null || { verdict=FAIL; reason+="guest-agent "; }
     # the source converts back to exclusive within its grace period
     t0=$(date +%s)
-    local back; back=$(wait_until 150 "source exclusive" sh -c "ssh -o BatchMode=yes root@$hip 'nox status' | grep '^held' | grep -vq '(sh)'") || { verdict=FAIL; reason+="source-not-exclusive "; }
+    local back; back=$(wait_until 150 "source exclusive" sh -c "! ssh -o BatchMode=yes root@$hip 'nox status' | grep '^held vm-$VMID-' | grep -q '(sh)'") || { verdict=FAIL; reason+="source-not-exclusive "; }
     local theld tdm
-    theld=$(s "$tip" "nox status | grep -c '^held' || true" 20); tdm=$(s "$tip" "dmsetup ls | grep -c '^nox-vm-$VMID' || true" 20)
+    theld=$(s "$tip" "nox status | grep -c '^held vm-$VMID-' || true" 20); tdm=$(s "$tip" "dmsetup ls | grep -c '^nox-vm-$VMID' || true" 20)
     [ "${theld:-0}" = 0 ] || { verdict=FAIL; reason+="target-holds:$theld "; }
     [ "${tdm:-0}" = 0 ] || { verdict=FAIL; reason+="target-dm:$tdm "; }
     nox_check "$hip" || { verdict=FAIL; reason+="check "; }

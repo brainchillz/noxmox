@@ -1,0 +1,5 @@
+# /etc/nox/<pool>.conf: one file per pool, read by noxd@<pool>.service.
+# The device must be the same LUN on every node; use a stable by-id or
+# multipath path. Host ids must be unique per node and stable (1..2000).
+NOX_DEVICE=/dev/disk/by-id/scsi-36001405b42cf859984a4173b8b4de5c8
+NOX_HOST_ID=1

@@ -303,6 +303,17 @@ type Volume struct {
 	Parent  uint32 `json:"parent"`
 	Format  uint32 `json:"format"`
 	Creator uint32 `json:"creator"`
+	// VirtSize is the guest visible size of a qcow2 volume; Size is the
+	// space reserved for it on the pool. Zero means equal to Size.
+	VirtSize uint64 `json:"virt_size"`
+}
+
+// GuestSize is the size the guest sees.
+func (v *Volume) GuestSize() uint64 {
+	if v.VirtSize != 0 {
+		return v.VirtSize
+	}
+	return v.Size
 }
 
 // HasParent reports whether the volume is backed by another volume.
@@ -361,6 +372,9 @@ func (v *Volume) encode(version uint32) ([]byte, error) {
 		le.PutUint32(b[136:], v.Parent)
 		le.PutUint32(b[140:], v.Format)
 		le.PutUint32(b[144:], v.Creator)
+		le.PutUint64(b[152:], v.VirtSize)
+	} else if v.VirtSize != 0 && v.VirtSize != v.Size {
+		return nil, errors.New("virtual size needs a format v2 pool (nox upgrade)")
 	}
 	off := runsOff
 	for _, r := range v.Runs {
@@ -406,6 +420,7 @@ func decodeVolume(b []byte) (*Volume, bool) {
 		v.Parent = le.Uint32(b[136:])
 		v.Format = le.Uint32(b[140:])
 		v.Creator = le.Uint32(b[144:])
+		v.VirtSize = le.Uint64(b[152:])
 	}
 	off := runsOff
 	for i := 0; i < n; i++ {

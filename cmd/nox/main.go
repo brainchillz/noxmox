@@ -22,11 +22,13 @@ var version = "dev"
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   nox format  --device DEV [--extent-size 256M] [--slots 1024] [--io-timeout 10] [--force]
-  nox daemon  --device DEV --host-id N [--socket PATH]
-  nox status | list                       [--socket PATH] [--json]
-  nox info NAME                           [--socket PATH] [--json]
-  nox create NAME SIZE                    [--socket PATH]
-  nox delete NAME                         [--socket PATH]
+  nox daemon  --device DEV --host-id N [--pool NAME] [--socket PATH]
+  every other command takes [--pool NAME] or [--socket PATH]
+  nox status | list [--json]
+  nox metrics                             prometheus text format
+  nox info NAME [--json]
+  nox create NAME SIZE [--format qcow2] [--parent NAME] [--virt-size SIZE]
+  nox delete NAME [--reparent]
   nox activate NAME [--shared] [--timeout SEC]
   nox deactivate NAME
   nox resize NAME SIZE
@@ -84,7 +86,8 @@ func main() {
 	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	device := fs.String("device", "", "shared block device")
-	socket := fs.String("socket", proto.DefaultSocket, "daemon socket")
+	pool := fs.String("pool", proto.DefaultPool, "pool name (selects the socket and the dm name prefix)")
+	socket := fs.String("socket", "", "daemon socket (default /run/noxd-<pool>.sock)")
 	hostID := fs.Uint64("host-id", 0, "sanlock host id (1..2000), unique per host")
 	extent := fs.String("extent-size", "256M", "extent size")
 	slots := fs.Uint("slots", 1024, "volume slots")
@@ -94,6 +97,10 @@ func main() {
 	timeout := fs.Int("timeout", 0, "seconds to wait for a lease")
 	asJSON := fs.Bool("json", false, "raw JSON output")
 	full := fs.Bool("full", false, "check: read every free slot's lease too")
+	format := fs.String("format", "raw", "create: raw or qcow2")
+	parent := fs.String("parent", "", "create: backing volume")
+	virtSize := fs.String("virt-size", "", "create/resize: guest visible size of a qcow2 volume")
+	reparent := fs.Bool("reparent", false, "delete: chain member whose data was merged; re-point its children")
 	// allow flags after positionals
 	var pos []string
 	for i := 0; i < len(args); i++ {
@@ -105,6 +112,12 @@ func main() {
 		pos = append(pos, args[i])
 	}
 
+	if *socket == "" {
+		*socket = proto.SocketPath(*pool)
+		if _, err := os.Stat(*socket); err != nil && *pool == proto.DefaultPool {
+			*socket = proto.DefaultSocket // a daemon from before pool names
+		}
+	}
 	call := func(req proto.Request, wait time.Duration) proto.Response {
 		resp, err := proto.Call(*socket, req, wait)
 		if err != nil {
@@ -161,15 +174,15 @@ func main() {
 			usage()
 		}
 		daemon.Version = version
-		die(daemon.Run(daemon.Config{Device: *device, HostID: *hostID, Socket: *socket, IOTimeout: *ioTimeout}))
+		die(daemon.Run(daemon.Config{Device: *device, HostID: *hostID, Pool: *pool, Socket: *socket, IOTimeout: *ioTimeout}))
 	case "status":
 		r := call(proto.Request{Op: "status"}, 30*time.Second)
 		if *asJSON {
 			printJSON(r)
 			return
 		}
-		fmt.Printf("nox       %s\npool      %v (format v%v, mailbox %v, io_timeout %v)\nlockspace %v (host id %v, ready %v)\ncapacity  %s total, %s used, %s free, %v volumes\n", version,
-			r["uuid"], r["format"], r["mailbox"], r["io_timeout"], r["lockspace"], r["host_id"], r["ready"], human(uint64(r["total"].(float64))), human(uint64(r["used"].(float64))), human(uint64(r["free"].(float64))), r["volumes"])
+		fmt.Printf("nox       %s (daemon %v)\npool      %v %v (format v%v, mailbox %v, io_timeout %v)\nlockspace %v (host id %v, ready %v)\ncapacity  %s total, %s used, %s free, %v volumes\n", version, r["version"],
+			r["pool"], r["uuid"], r["format"], r["mailbox"], r["io_timeout"], r["lockspace"], r["host_id"], r["ready"], human(uint64(r["total"].(float64))), human(uint64(r["used"].(float64))), human(uint64(r["free"].(float64))), r["volumes"])
 		if hs, ok := r["hosts"].([]any); ok {
 			for _, h := range hs {
 				m := h.(map[string]any)
@@ -179,7 +192,11 @@ func main() {
 		if hl, ok := r["held"].([]any); ok {
 			for _, h := range hl {
 				m := h.(map[string]any)
-				fmt.Printf("held %v (%v)\n", m["name"], m["mode"])
+				kind := m["mode"]
+				if b, _ := m["backing"].(bool); b {
+					kind = "sh, backing"
+				}
+				fmt.Printf("held %v (%v)\n", m["name"], kind)
 			}
 		}
 	case "list":
@@ -209,7 +226,16 @@ func main() {
 		if err != nil {
 			die(err)
 		}
-		r := call(proto.Request{Op: cmd, Name: pos[0], Size: sz}, 60*time.Second)
+		req := proto.Request{Op: cmd, Name: pos[0], Size: sz}
+		if cmd == "create" {
+			req.Format, req.Parent = *format, *parent
+		}
+		if *virtSize != "" {
+			if req.VirtSize, err = parseSize(*virtSize); err != nil {
+				die(err)
+			}
+		}
+		r := call(req, 60*time.Second)
 		if *asJSON {
 			printJSON(r["volume"])
 		} else {
@@ -219,7 +245,7 @@ func main() {
 		if len(pos) < 1 {
 			usage()
 		}
-		call(proto.Request{Op: cmd, Name: pos[0]}, 60*time.Second)
+		call(proto.Request{Op: cmd, Name: pos[0], Reparent: *reparent}, 60*time.Second)
 	case "rename":
 		if len(pos) < 2 {
 			usage()
@@ -250,6 +276,8 @@ func main() {
 			usage()
 		}
 		fmt.Println(call(proto.Request{Op: "path", Name: pos[0]}, 10*time.Second)["path"])
+	case "metrics":
+		fmt.Print(call(proto.Request{Op: "metrics"}, 30*time.Second)["text"])
 	case "check":
 		r := call(proto.Request{Op: "check", Full: *full}, 10*time.Minute)
 		if *asJSON {

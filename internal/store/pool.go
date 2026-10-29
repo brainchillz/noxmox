@@ -253,9 +253,10 @@ func (t *Table) FreeSlotAfter(after uint32) (uint32, error) {
 
 // CreateOpts are the optional attributes of a new volume.
 type CreateOpts struct {
-	Format  uint32 // FormatRaw or FormatQcow2
-	Parent  *Volume
-	Creator uint32 // host id creating the volume
+	Format   uint32 // FormatRaw or FormatQcow2
+	Parent   *Volume
+	Creator  uint32 // host id creating the volume
+	VirtSize uint64 // guest visible size when it differs from the reserved size
 }
 
 // Create allocates extents and writes an active record into slot. Caller
@@ -284,7 +285,7 @@ func (p *Pool) CreateWith(t *Table, slot uint32, name string, size uint64, o Cre
 		return nil, err
 	}
 	v := &Volume{Slot: uint32(slot), Gen: t.nextGen(uint32(slot)), State: StateActive, Name: name, Size: size, Created: time.Now().Unix(), Runs: runs,
-		Format: o.Format, Creator: o.Creator}
+		Format: o.Format, Creator: o.Creator, VirtSize: o.VirtSize}
 	if o.Parent != nil {
 		if t.Vols[o.Parent.Slot] == nil || t.Vols[o.Parent.Slot].Name != o.Parent.Name {
 			return nil, fmt.Errorf("parent %q is not in the table", o.Parent.Name)
@@ -337,6 +338,28 @@ func (p *Pool) Delete(t *Table, v *Volume) error {
 	if c := t.Children(v); len(c) > 0 {
 		return fmt.Errorf("%s is the backing volume of %s", v.Name, c[0].Name)
 	}
+	return p.deleteRecord(t, v)
+}
+
+// DeleteFromChain removes a volume whose data has already been merged into
+// its neighbours (qemu commit or stream): its children are re-pointed at
+// its own parent first, so the chain stays connected. Each re-parent is a
+// record write; a crash in between leaves every child still valid.
+func (p *Pool) DeleteFromChain(t *Table, v *Volume) error {
+	for _, c := range t.Children(v) {
+		nc := *c
+		nc.Runs = append([]Run(nil), c.Runs...)
+		nc.Parent = v.Parent
+		nc.Gen = c.Gen + 1
+		if err := p.writeRecord(t, &nc); err != nil {
+			return err
+		}
+		t.Vols[c.Slot] = &nc
+	}
+	return p.deleteRecord(t, v)
+}
+
+func (p *Pool) deleteRecord(t *Table, v *Volume) error {
 	free := &Volume{Slot: v.Slot, Gen: v.Gen + 1, State: StateFree, Name: v.Name, UUID: v.UUID}
 	if err := p.writeRecord(t, free); err != nil {
 		return err
@@ -348,7 +371,14 @@ func (p *Pool) Delete(t *Table, v *Volume) error {
 
 // Grow extends a volume to newSize, appending runs as needed.
 func (p *Pool) Grow(t *Table, v *Volume, newSize uint64) (*Volume, error) {
-	if newSize <= v.Size {
+	return p.GrowTo(t, v, newSize, 0)
+}
+
+// GrowTo is Grow with a new guest visible size for qcow2 volumes (0 keeps
+// the record's value). The reserved size may stay equal when only the
+// guest size changes.
+func (p *Pool) GrowTo(t *Table, v *Volume, newSize uint64, virtSize uint64) (*Volume, error) {
+	if newSize < v.Size || (newSize == v.Size && (virtSize == 0 || virtSize == v.VirtSize)) {
 		return nil, errors.New("shrinking is not supported")
 	}
 	have := v.Extents()
@@ -363,6 +393,9 @@ func (p *Pool) Grow(t *Table, v *Volume, newSize uint64) (*Volume, error) {
 		nv.Runs = append(nv.Runs, more...)
 	}
 	nv.Size = newSize
+	if virtSize != 0 {
+		nv.VirtSize = virtSize
+	}
 	nv.Gen = v.Gen + 1
 	if err := p.writeRecord(t, &nv); err != nil {
 		return nil, err

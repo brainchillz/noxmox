@@ -15,8 +15,9 @@ go:
     - go test ./...
     - go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" -o bin/nox ./cmd/nox
     - ./bin/nox version
+    - ./deploy/build-deb.sh
   artifacts:
-    paths: [bin/nox]
+    paths: [bin/nox, dist/*.deb]
     expire_in: 1 week
 
 perl:

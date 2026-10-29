@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   go:
     name: go vet, test, build
@@ -28,6 +31,17 @@ jobs:
         with:
           name: nox-linux-amd64
           path: bin/nox
+      - name: Build Debian package
+        run: ./deploy/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nox-deb
+          path: dist/*.deb
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.deb --title "nox ${GITHUB_REF_NAME}" --generate-notes || gh release upload "${GITHUB_REF_NAME}" dist/*.deb --clobber
 
   perl:
     name: perl -c NoxPlugin.pm
