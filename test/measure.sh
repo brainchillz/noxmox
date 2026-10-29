@@ -12,7 +12,7 @@ N=${N:-5}
 holder=$(vm_node); [ -n "$holder" ] || die "guest $VMID not running"
 other=$(other_node "$holder"); hip=$(node_ip "$holder"); oip=$(node_ip "$other")
 commit=$(git -C "$HERE/.." describe --tags --always --dirty 2>/dev/null)
-binver=$(s "$hip" "nox version" 10)
+binver=$(s "$hip" "nox version" 10 | awk "{print \$NF}")
 log "measuring on $holder/$other, nox $binver, repo $commit, N=$N"
 
 median() { sort -n | awk '{a[NR]=$1} END{print (NR%2 ? a[(NR+1)/2] : (a[NR/2]+a[NR/2+1])/2)}'; }
