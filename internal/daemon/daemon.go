@@ -1431,6 +1431,33 @@ func (d *Daemon) repair(resp proto.Response) error {
 				actions = append(actions, fmt.Sprintf("%s: stale device still open, left alone", n))
 			}
 		}
+		// Stale shared orphan leases: an abnormally aborted migration (the
+		// source fenced mid-handoff) can leave a volume's lease held shared
+		// as a sanlock orphan with no device and no guest here, which blocks
+		// a later exclusive activation forever. If this host holds such a
+		// lease for an active volume it has no device for and is not holding
+		// in its own map, release the orphan. ReleaseOrphan only affects this
+		// host's own orphan on the resource, so it is a no-op otherwise.
+		for _, v := range t.Active() {
+			if _, ok := d.held[v.Name]; ok || store.DMExists(v.Name) {
+				continue
+			}
+			owners, shared, oerr := sanlock.Owners(d.res(v.Slot))
+			if oerr != nil {
+				continue
+			}
+			mine := false
+			for _, o := range owners {
+				if o.HostID == d.cfg.HostID {
+					mine = true
+				}
+			}
+			if mine {
+				if err := sanlock.ReleaseOrphan(d.res(v.Slot)); err == nil {
+					actions = append(actions, fmt.Sprintf("%s: released stale %s orphan lease (slot %d, no device here)", v.Name, map[bool]string{true: "shared", false: "exclusive"}[shared], v.Slot))
+				}
+			}
+		}
 		fixed, err := d.pool.RepairCopies()
 		for _, s := range fixed {
 			actions = append(actions, fmt.Sprintf("slot %d: rewrote the unreadable copy from the valid one", s))
