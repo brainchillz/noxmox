@@ -51,6 +51,7 @@ type held struct {
 	sharedUntil time.Time // no self-upgrade before this (migration window)
 	backing     bool      // held shared because a chain on top of it is active here; never upgraded
 	since       time.Time
+	goneSince   time.Time // when the dm device first went missing under us (0 = present)
 }
 
 type stats struct {
@@ -194,6 +195,8 @@ func (d *Daemon) join() {
 	go d.events()
 	go d.mailbox()
 	go d.upgrader()
+	go d.reaper()
+	go d.healthcheck()
 }
 
 func (d *Daemon) mboxRes() sanlock.Resource {
@@ -464,6 +467,77 @@ func (d *Daemon) shareRequest(from uint64, op uint32, arg uint64) {
 
 // upgrader opportunistically converts shared leases back to exclusive once
 // the peer has released, which is how a migration target ends up exclusive.
+// reaper releases a lease this host holds for a volume whose device-mapper
+// device has gone away under it, which is what the fence killpath leaves
+// behind: it kills the guest and tears the volume down, but the daemon
+// keeps holding the lease. Without this the lease is stuck held (shared or
+// exclusive) with no guest, and a survivor's exclusive acquire blocks on it
+// forever. A short grace avoids racing a normal deactivate or a resize.
+func (d *Daemon) reaper() {
+	const grace = 30 * time.Second
+	for {
+		time.Sleep(10 * time.Second)
+		d.mu.Lock()
+		for name, h := range d.held {
+			if h.backing || d.pending[name] {
+				h.goneSince = time.Time{}
+				continue
+			}
+			if store.DMExists(name) {
+				h.goneSince = time.Time{}
+				continue
+			}
+			if h.goneSince.IsZero() {
+				h.goneSince = time.Now()
+				continue
+			}
+			if time.Since(h.goneSince) < grace {
+				continue
+			}
+			if err := sanlock.Release(d.sock, d.res(h.vol.Slot)); err != nil {
+				d.lg.Printf("reaper: release %s: %v", name, err)
+				continue
+			}
+			delete(d.held, name)
+			d.lg.Printf("reaper: released lease of %s (its device has been gone %s; guest fenced)", name, grace)
+		}
+		d.releaseUnusedBacking()
+		d.mu.Unlock()
+	}
+}
+
+// healthcheck notices when this host's device handle has gone stale, which
+// happens after an iSCSI session drops and re-logs-in: the old fd keeps
+// erroring while a fresh open of the same path works. When the device is
+// back but our fd is stale, exit so systemd restarts us with a fresh open;
+// leases persist as orphans and are re-adopted, invisible to running
+// guests. If a fresh open also fails the device is genuinely gone (an
+// outage or a fence in progress), so stay put and let that path handle it.
+func (d *Daemon) healthcheck() {
+	fails := 0
+	for {
+		time.Sleep(10 * time.Second)
+		if _, err := d.pool.Dev.ReadAt(0, store.SBSize); err == nil {
+			fails = 0
+			continue
+		}
+		fails++
+		if fails < 3 {
+			continue
+		}
+		fresh, err := store.OpenDevice(d.cfg.Device)
+		if err != nil {
+			continue // device genuinely unreachable; not a stale fd
+		}
+		_, rerr := fresh.ReadAt(0, store.SBSize)
+		fresh.Close()
+		if rerr == nil {
+			d.lg.Printf("device handle is stale but %s is reachable again; exiting for a clean reopen (leases stay as orphans)", d.cfg.Device)
+			os.Exit(0)
+		}
+	}
+}
+
 func (d *Daemon) upgrader() {
 	for {
 		time.Sleep(2 * time.Second)
