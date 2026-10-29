@@ -1,0 +1,23 @@
+#!/bin/sh
+# $1 = remote name, $2 = url. Reads "<local ref> <local sha> <remote ref> <remote sha>" lines.
+# Enable with: git config core.hooksPath .githooks
+#
+# Two guards:
+#   - GitHub only ever receives main and release tags (v*).
+#   - No ref that contains planning/ or a credentials file goes anywhere.
+remote="$1"; url="$2"
+status=0
+while read -r lref lsha rref rsha; do
+    [ "$lsha" = "0000000000000000000000000000000000000000" ] && continue
+    case "$url" in
+        *github.com*)
+            case "$rref" in
+                refs/heads/main|refs/tags/v*) ;;
+                *) echo "pre-push: only main and v* tags may be pushed to GitHub (refused $rref)" >&2; status=1 ;;
+            esac ;;
+    esac
+    if git ls-tree -r --name-only "$lsha" | grep -qE '^planning/|(^|/)proxmox-creds$|\.creds$|(^|/)\.env(\..*)?$'; then
+        echo "pre-push: $lref contains private files, refusing to push to $remote" >&2; status=1
+    fi
+done
+exit $status

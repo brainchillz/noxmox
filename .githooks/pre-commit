@@ -1,0 +1,9 @@
+#!/bin/sh
+# Refuse to commit anything under planning/ or any credentials file.
+# Enable with: git config core.hooksPath .githooks
+bad=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^planning/|(^|/)proxmox-creds$|\.creds$|(^|/)\.env(\..*)?$' || true)
+if [ -n "$bad" ]; then
+    echo "pre-commit: refusing to commit private files:" >&2
+    echo "$bad" | sed 's/^/  /' >&2
+    exit 1
+fi
