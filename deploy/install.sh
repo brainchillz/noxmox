@@ -13,7 +13,7 @@ usage() { echo "usage: $0 root@node HOST_ID DEVICE_PATH" >&2; exit 2; }
 TARGET=$1; HOST_ID=$2; DEVICE=$3
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
-[ -x "$HERE/bin/nox" ] || (cd "$HERE" && go build -o bin/nox ./cmd/nox)
+[ -x "$HERE/bin/nox" ] || (cd "$HERE" && go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/nox ./cmd/nox)
 
 scp -q "$HERE/bin/nox" "$HERE/deploy/noxd.service" "$HERE/deploy/nox-watchdog-order.service" "$HERE/deploy/90-nox-watchdog.rules" "$HERE/pve/NoxPlugin.pm" "$TARGET:/tmp/"
 ssh "$TARGET" bash -s "$HOST_ID" "$DEVICE" <<'REMOTE'

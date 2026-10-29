@@ -16,6 +16,9 @@ import (
 	"noxmox/internal/store"
 )
 
+// version is set at build time: go build -ldflags "-X main.version=v0.1.0".
+var version = "dev"
+
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   nox format  --device DEV [--extent-size 256M] [--slots 1024] [--io-timeout 10] [--force]
@@ -27,7 +30,8 @@ func usage() {
   nox activate NAME [--shared] [--timeout SEC]
   nox deactivate NAME
   nox resize NAME SIZE
-  nox convert NAME ex|sh`)
+  nox convert NAME ex|sh
+  nox version`)
 	os.Exit(2)
 }
 
@@ -71,6 +75,10 @@ func main() {
 		usage()
 	}
 	cmd, args := os.Args[1], os.Args[2:]
+	if cmd == "version" {
+		fmt.Println("nox", version)
+		return
+	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	device := fs.String("device", "", "shared block device")
 	socket := fs.String("socket", proto.DefaultSocket, "daemon socket")
@@ -146,7 +154,7 @@ func main() {
 			printJSON(r)
 			return
 		}
-		fmt.Printf("pool      %v\nlockspace %v (host id %v, ready %v)\ncapacity  %s total, %s used, %s free, %v volumes\n",
+		fmt.Printf("nox       %s\npool      %v\nlockspace %v (host id %v, ready %v)\ncapacity  %s total, %s used, %s free, %v volumes\n", version,
 			r["uuid"], r["lockspace"], r["host_id"], r["ready"], human(uint64(r["total"].(float64))), human(uint64(r["used"].(float64))), human(uint64(r["free"].(float64))), r["volumes"])
 		if hs, ok := r["hosts"].([]any); ok {
 			for _, h := range hs {
