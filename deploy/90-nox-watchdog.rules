@@ -1,0 +1,2 @@
+# Stable name for the software watchdog so wdmd does not depend on probe order.
+SUBSYSTEM=="watchdog", ATTR{identity}=="Software Watchdog", SYMLINK+="watchdog-soft"

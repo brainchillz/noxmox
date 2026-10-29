@@ -1,0 +1,14 @@
+[Unit]
+Description=Load iTCO before softdog so watchdog-mux takes /dev/watchdog0 and wdmd gets softdog
+Documentation=file:/usr/share/doc/nox
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=sysinit.target watchdog-mux.service wdmd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/sbin/modprobe iTCO_wdt
+
+[Install]
+WantedBy=sysinit.target

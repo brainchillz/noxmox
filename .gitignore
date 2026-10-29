@@ -1,0 +1,16 @@
+# private planning material, never published
+/planning/
+
+# build output
+/bin/
+
+# credentials and local state
+proxmox-creds
+*.creds
+.env
+.env.*
+
+# editor and OS noise
+*.swp
+*~
+.DS_Store
