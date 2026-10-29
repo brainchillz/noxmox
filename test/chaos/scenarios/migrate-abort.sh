@@ -5,11 +5,12 @@ scenario_run() {
     local holder target hip tip t0 verdict=PASS reason=""
     holder=$(vm_node); target=$(other_node "$holder"); hip=$(node_ip "$holder"); tip=$(node_ip "$target")
     log "migrating $VMID $holder -> $target and killing the target QEMU"
-    s "$hip" "nohup qm migrate $VMID $target --online > /tmp/chaos-migrate.log 2>&1 &" 15
-    wait_until 120 "target qemu" s "$tip" "pgrep -f 'kvm.*-id $VMID' >/dev/null" 10 >/dev/null || { result migrate-abort FAIL "target-never-started"; return 1; }
+    # patterns are anchored so they never match the shell that runs them
+    s "$hip" "nohup qm migrate $VMID $target --online > /tmp/chaos-migrate.log 2>&1 & echo \$! > /tmp/chaos-migrate.pid" 15
+    wait_until 120 "target qemu" s "$tip" "pgrep -f '^/usr/bin/kvm -id $VMID ' >/dev/null" 10 >/dev/null || { result migrate-abort FAIL "target-never-started"; return 1; }
     sleep 4
-    s "$tip" "pkill -9 -f 'kvm.*-id $VMID'; echo killed" 15
-    wait_until 300 "migrate command to finish" s "$hip" "! pgrep -f 'qm migrate $VMID' >/dev/null" 10 >/dev/null
+    s "$tip" "pkill -9 -f '^/usr/bin/kvm -id $VMID '; echo killed" 15
+    wait_until 300 "migrate command to finish" s "$hip" "! kill -0 \$(cat /tmp/chaos-migrate.pid) 2>/dev/null" 10 >/dev/null
     log "migrate log: $(s "$hip" "grep -E 'ERROR|failed|aborted' /tmp/chaos-migrate.log | tail -2" 10)"
     s "$hip" "qm status $VMID" 20 | grep -q running || { verdict=FAIL; reason+="guest-not-on-source "; }
     agent_wait "$hip" >/dev/null || { verdict=FAIL; reason+="guest-agent "; }

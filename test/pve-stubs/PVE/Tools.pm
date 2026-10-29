@@ -3,6 +3,8 @@
 package PVE::Tools;
 use strict;
 use warnings;
+use Exporter 'import';
+our @EXPORT_OK = qw(run_command);
 sub run_with_timeout { die "stub\n" }
 sub run_command      { die "stub\n" }
 1;

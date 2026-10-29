@@ -4,7 +4,9 @@
 package PVE::Storage::Plugin;
 use strict;
 use warnings;
-sub register       { }
-sub init           { }
-sub parse_volname  { die "stub\n" }
+sub register              { }
+sub init                  { }
+sub parse_volname         { die "stub\n" }
+sub get_next_vm_diskname  { die "stub\n" }
+sub preallocation_cmd_opt { die "stub\n" }
 1;
