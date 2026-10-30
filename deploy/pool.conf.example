@@ -3,3 +3,5 @@
 # multipath path. Host ids must be unique per node and stable (1..2000).
 NOX_DEVICE=/dev/disk/by-id/scsi-36001405b42cf859984a4173b8b4de5c8
 NOX_HOST_ID=1
+# Optional: serve Prometheus metrics for a scraper (empty = off).
+NOX_METRICS_ADDR=

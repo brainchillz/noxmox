@@ -8,7 +8,7 @@ Before=pve-guests.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/nox/%i.conf
-ExecStart=/usr/sbin/nox daemon --pool %i --device ${NOX_DEVICE} --host-id ${NOX_HOST_ID}
+ExecStart=/usr/sbin/nox daemon --pool %i --device ${NOX_DEVICE} --host-id ${NOX_HOST_ID} --metrics-addr ${NOX_METRICS_ADDR}
 Restart=always
 RestartSec=3
 # leases are orphaned on exit on purpose; never SIGKILL mid-operation

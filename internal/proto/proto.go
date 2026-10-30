@@ -36,6 +36,7 @@ type Request struct {
 	VirtSize  uint64   `json:"virt_size,omitempty"`  // create/resize: guest visible size of a qcow2 volume
 	Reparent  bool     `json:"reparent,omitempty"`   // delete: volume is a merged chain member, re-point its children
 	IOTimeout int      `json:"io_timeout,omitempty"` // set-io-timeout: new sanlock io_timeout in seconds
+	Force     bool     `json:"force,omitempty"`      // pr-reserve: reserve even with <2 hosts registered
 }
 
 // Response carries ok/error plus op-specific fields.

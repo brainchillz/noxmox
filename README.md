@@ -69,6 +69,22 @@ lab (HP EliteDesk 800 G6 minis, 1 GbE, LIO target on a file).
 Not built: thin provisioning (see below), hardware watchdog or IPMI fencing
 integration beyond what sanlock and wdmd give you, and the Incus driver.
 
+## Reproducing the numbers
+
+Every figure above comes from a script on the lab, not a guess:
+
+- Activation, refusal, resize and live-migration numbers: `test/measure.sh`
+  (medians over N runs; prints the commit and host it measured).
+- Dead-host takeover, watchdog-reset and the fence outcomes:
+  `test/chaos/run.sh`, which writes one line per scenario with its measured
+  times to `test/chaos/logs/results.tsv`; `test/measure.sh` folds the latest
+  of those into its table.
+- Crash safety and the allocator numbers: `go test ./internal/store/ ./test/replay/`.
+
+The quoted values are from the two-node HP EliteDesk 800 G6 lab against a
+1 TB LIO fileio LUN at io_timeout 10; re-run the scripts on your hardware
+for yours.
+
 ## Why not just use ...
 
 | Option | What you give up |
@@ -231,9 +247,16 @@ independent of the watchdog. It is off by default and never required.
 If both pass, enable it: `nox pr-enable` on each node (sets the pool's PR
 bit and registers the node), restart the daemons so every node registers,
 confirm `nox pr-status` lists every host key, then `nox pr-reserve` once to
-start enforcement. From then on each node registers its key on start and
-refuses to start if it cannot, and a survivor taking a volume over from a
-dead host preempts that host's key so the array drops its writes.
+start enforcement. `pr-reserve` refuses while fewer than two hosts are
+registered (so turning enforcement on cannot lock out a peer whose daemon
+has not joined PR mode yet); pass `--force` for a deliberate single-node
+pool. From then on each node registers its key on start and refuses to
+start if it cannot, and a survivor taking a volume over from a dead host
+preempts that host's key so the array drops its writes.
+
+Set `NOX_METRICS_ADDR` (or `nox daemon --metrics-addr :9965`) to serve the
+Prometheus metrics over HTTP at `/metrics` for a scraper, instead of only
+`nox metrics` on the CLI.
 
 ## CLI
 
@@ -243,6 +266,7 @@ dead host preempts that host's key so the array drops its writes.
     nox delete NAME | resize NAME SIZE | rename NAME NEWNAME
     nox activate NAME [--shared] [--timeout SEC] | deactivate NAME
     nox format --device DEV [--extent-size 256M] [--slots 1024] [--io-timeout 10]
+    nox daemon --device DEV --host-id N [--pool NAME] [--metrics-addr :9965]
     nox upgrade                  # format v1 to v2, with every volume inactive
     nox set-io-timeout SEC       # rewrite the lockspace timeout, other daemons stopped
     nox version

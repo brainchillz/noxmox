@@ -123,6 +123,7 @@ func main() {
 	extent := fs.String("extent-size", "256M", "extent size")
 	slots := fs.Uint("slots", 1024, "volume slots")
 	ioTimeout := fs.Int("io-timeout", 10, "sanlock io timeout seconds")
+	metricsAddr := fs.String("metrics-addr", "", "daemon: serve Prometheus /metrics on this address, e.g. :9965")
 	force := fs.Bool("force", false, "overwrite an existing pool")
 	shared := fs.Bool("shared", false, "activate in shared mode (migration target)")
 	timeout := fs.Int("timeout", 0, "seconds to wait for a lease")
@@ -205,7 +206,7 @@ func main() {
 			usage()
 		}
 		daemon.Version = version
-		die(daemon.Run(daemon.Config{Device: *device, HostID: *hostID, Pool: *pool, Socket: *socket, IOTimeout: *ioTimeout}))
+		die(daemon.Run(daemon.Config{Device: *device, HostID: *hostID, Pool: *pool, Socket: *socket, IOTimeout: *ioTimeout, MetricsAddr: *metricsAddr}))
 	case "status":
 		r := call(proto.Request{Op: "status"}, 30*time.Second)
 		if *asJSON {
@@ -298,7 +299,7 @@ func main() {
 		fmt.Println("PR mode enabled and this host registered. Register every node (restart their daemons),")
 		fmt.Println("check 'nox pr-status' shows all host keys, then run 'nox pr-reserve' once to start enforcement.")
 	case "pr-reserve":
-		r := call(proto.Request{Op: "pr-reserve"}, 60*time.Second)
+		r := call(proto.Request{Op: "pr-reserve", Force: *force}, 60*time.Second)
 		fmt.Printf("PR reservation active; enforcement on (%v keys registered)\n", r["keys"])
 	case "pr-status":
 		r := call(proto.Request{Op: "pr-status"}, 30*time.Second)

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -37,12 +38,13 @@ var Version = "dev"
 
 // Config for one daemon.
 type Config struct {
-	Device    string
-	HostID    uint64
-	Pool      string // pool name: selects the socket and the dm name prefix
-	Socket    string
-	IOTimeout int
-	Fencer    string // path to the fence helper (default /usr/sbin/nox)
+	Device      string
+	HostID      uint64
+	Pool        string // pool name: selects the socket and the dm name prefix
+	Socket      string
+	IOTimeout   int
+	Fencer      string // path to the fence helper (default /usr/sbin/nox)
+	MetricsAddr string // if set, serve Prometheus /metrics on this address
 }
 
 type held struct {
@@ -153,6 +155,9 @@ func Run(cfg Config) error {
 		_ = os.Symlink(cfg.Socket, proto.DefaultSocket)
 	}
 
+	if cfg.MetricsAddr != "" {
+		go d.serveMetrics(cfg.MetricsAddr)
+	}
 	go d.handleSignals()
 	go d.join()
 	for {
@@ -657,7 +662,7 @@ func (d *Daemon) dispatch(req proto.Request, resp proto.Response) error {
 	case "pr-enable":
 		return d.prEnable(resp)
 	case "pr-reserve":
-		return d.prReserve(resp)
+		return d.prReserve(req.Force, resp)
 	case "pr-status":
 		return d.prStatus(resp)
 	}
@@ -679,6 +684,12 @@ func (d *Daemon) heldInfo() []map[string]any {
 // metrics renders the daemon's state in the Prometheus text format, for a
 // node exporter textfile collector or a scrape through a small proxy.
 func (d *Daemon) metrics(resp proto.Response) error {
+	resp["text"] = d.metricsText()
+	return nil
+}
+
+// metricsText renders the daemon's state in the Prometheus text format.
+func (d *Daemon) metricsText() string {
 	var b strings.Builder
 	g := func(name, help, typ string, labels string, v any) {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n%s%s %v\n", name, help, name, typ, name, labels, v)
@@ -732,8 +743,21 @@ func (d *Daemon) metrics(resp proto.Response) error {
 			fmt.Fprintf(&b, "# HELP nox_hosts hosts seen in the lockspace\n# TYPE nox_hosts gauge\nnox_hosts{pool=%q,state=\"live\"} %d\nnox_hosts{pool=%q,state=\"dead\"} %d\n", d.cfg.Pool, live, d.cfg.Pool, dead)
 		}
 	}
-	resp["text"] = b.String()
-	return nil
+	return b.String()
+}
+
+// serveMetrics exposes the Prometheus text format over HTTP for a scraper.
+func (d *Daemon) serveMetrics(addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(d.metricsText()))
+	})
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	d.lg.Printf("serving Prometheus metrics on %s/metrics", addr)
+	if err := srv.ListenAndServe(); err != nil {
+		d.lg.Printf("metrics server stopped: %v", err)
+	}
 }
 
 func (d *Daemon) status(resp proto.Response) error {
@@ -1695,16 +1719,28 @@ func (d *Daemon) prEnable(resp proto.Response) error {
 // prReserve creates the all-registrants reservation, which switches
 // enforcement on. Call it only once every participating node has registered
 // (check nox pr status), or an unregistered node will be fenced.
-func (d *Daemon) prReserve(resp proto.Response) error {
+func (d *Daemon) prReserve(force bool, resp proto.Response) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.pr == nil {
 		return errors.New("PR is not enabled on this node")
 	}
+	// Creating the reservation switches enforcement on, which fences every
+	// node that has not registered yet. Refuse unless at least two hosts are
+	// registered (this is a shared pool), so a reserve cannot lock out peers
+	// whose daemons have not been restarted into PR mode. --force skips the
+	// check for a deliberate single-node pool.
+	keys, kerr := d.pr.Keys()
+	if kerr != nil {
+		return fmt.Errorf("read registered keys: %w", kerr)
+	}
+	if len(keys) < 2 && !force {
+		return fmt.Errorf("only %d host registered; register every node (nox pr-enable on each, restart their daemons, confirm with nox pr-status) before reserving, or pass --force for a single-node pool", len(keys))
+	}
 	if err := d.pr.Reserve(scsipr.KeyForHost(d.cfg.HostID)); err != nil {
 		return err
 	}
-	keys, _ := d.pr.Keys()
+	keys, _ = d.pr.Keys()
 	d.lg.Printf("pr: reservation active; enforcement on. %d keys registered.", len(keys))
 	resp["keys"] = len(keys)
 	return nil

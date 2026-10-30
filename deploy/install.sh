@@ -37,7 +37,7 @@ udevadm control --reload
 install -m 0755 /tmp/nox /usr/sbin/nox
 install -m 0644 "/tmp/noxd@.service" /etc/systemd/system/noxd@.service
 install -d -m 0755 /etc/nox
-printf 'NOX_DEVICE=%s\nNOX_HOST_ID=%s\n' "$DEVICE" "$HOST_ID" > "/etc/nox/$POOL.conf"
+printf 'NOX_DEVICE=%s\nNOX_HOST_ID=%s\nNOX_METRICS_ADDR=%s\n' "$DEVICE" "$HOST_ID" "${NOX_METRICS_ADDR:-}" > "/etc/nox/$POOL.conf"
 
 # Timeouts that must agree (see README). A failed iSCSI path has to return an
 # I/O error before sanlock gives up on the host, or the node fences itself
