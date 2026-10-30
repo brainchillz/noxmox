@@ -189,6 +189,31 @@ timeout) are too long for it and should be lowered to about 60 s, or
 io_timeout raised to 20 at format time. The pool records io_timeout so
 every host joins with the same value.
 
+Raising io_timeout does not speed recovery; it trades recovery time for
+blip tolerance, and the two failure modes do not move together. Measured on
+the lab, survivor acquires the holder's volume after:
+
+| Failure mode | io_timeout 10 | io_timeout 20 |
+|---|---|---|
+| Hard reset (holder gone at once) | ~77 s | ~77 s |
+| Storage path lost (holder self-fences) | ~150 s | ~224 s |
+
+A hard crash is found through the survivor's dead-host detection, which
+floored near 80 s on this hardware and did not grow with io_timeout. A lost
+path is slower because the holder must fail `8 * io_timeout` of renewals
+before sanlock runs the fence, so doubling io_timeout adds about that much.
+Raising io_timeout therefore buys tolerance for a storage blip shorter than
+`8 * io_timeout` (it no longer fences the node) at the cost of slower
+recovery from a real path loss, and leaves clean-crash takeover about where
+it was. Lower it only on storage that returns an I/O error well inside
+`8 * io_timeout`: io_timeout 5 gives a 40 s window, shorter than a single
+iSCSI command can take to fail (a 15 s `replacement_timeout` plus the 30 s
+SCSI command timeout is up to 45 s), so a brief path flap would fence the
+node. io_timeout 10 is the default for that reason; change it only with the
+path timeouts measured to match. Use `nox set-io-timeout` to change it in
+place: every daemon but one must be stopped and out of the lockspace first,
+because all hosts have to rejoin at the new value together.
+
 ## Standalone nodes
 
 Nothing in nox talks to corosync or pmxcfs. Each node needs a unique host id
