@@ -55,6 +55,17 @@ if [ "$1" = configure ]; then
     for s in pvedaemon pveproxy pvestatd pvescheduler; do
         systemctl try-restart "$s" >/dev/null 2>&1 || true
     done
+    # Fencing timing needs a failed iSCSI path to error before sanlock's
+    # 8 x io_timeout window (80 s at the default io_timeout 10). The iSCSI
+    # replacement_timeout is node-wide and shared with any other iSCSI
+    # storage here, so this package warns rather than editing it; set it
+    # yourself (deploy/install.sh does, as an explicit deploy step).
+    rt=$(sed -n 's/^node.session.timeo.replacement_timeout = *//p' /etc/iscsi/iscsid.conf 2>/dev/null | tail -1)
+    if [ -n "$rt" ] && [ "$rt" -gt 80 ] 2>/dev/null; then
+        echo "nox: iSCSI replacement_timeout is ${rt}s; lower it below 8 x io_timeout (e.g. 15 s) so a" >&2
+        echo "nox: lost path errors before sanlock fences this node. See the install section of" >&2
+        echo "nox: /usr/share/doc/nox/README.md ('Timeouts that must agree')." >&2
+    fi
 fi
 POSTINST
 cat > "$STAGE/root/DEBIAN/prerm" <<'PRERM'

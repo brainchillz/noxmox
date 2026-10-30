@@ -243,7 +243,17 @@ From a release package:
     apt install ./nox_<version>_amd64.deb
     install -d /etc/nox
     printf 'NOX_DEVICE=/dev/disk/by-id/scsi-<wwid>\nNOX_HOST_ID=1\n' > /etc/nox/nox.conf   # unique host id per node
+    # A lost path must error before sanlock's 8 x io_timeout window (80 s at
+    # the default io_timeout 10), or the node fences on a blip. The stock
+    # iSCSI replacement timeout is 120 s; lower it. This is node-wide, so if
+    # other iSCSI storage shares this host, set it on nox's target records
+    # only. See "Timeouts that must agree".
+    sed -i 's/^node.session.timeo.replacement_timeout = .*/node.session.timeo.replacement_timeout = 15/' /etc/iscsi/iscsid.conf
     systemctl enable --now wdmd sanlock noxd@nox
+
+The package points wdmd at `/dev/watchdog`; confirm that device actually
+resets this hardware (see the watchdog note below), and `deploy/install.sh`
+does both of these steps and the watchdog wiring for you.
 
 Or from a checkout, which does the same over ssh:
 
