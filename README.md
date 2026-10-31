@@ -35,7 +35,7 @@ at all. Two independent Proxmox boxes and one SAN LUN is a supported layout.
 Status: working prototype, tested on a two-node Proxmox VE 9.2 cluster against
 a 1 TB iSCSI LUN. Every claim below is exercised by the test suite in
 `test/`; the numbers come from `test/measure.sh` and the chaos suite on that
-lab (HP EliteDesk 800 G6 minis, 1 GbE, LIO target on a file).
+lab (HP EliteDesk 800 G6 minis, 10 GbE, LIO target on a file).
 
 - Volumes are device-mapper linear maps over fixed extents (256 MiB by
   default, 16 MiB minimum). Activation takes about 100 ms. Resize is online

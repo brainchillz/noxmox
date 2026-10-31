@@ -6,7 +6,7 @@ the lab, the pass criteria and the latest measured results are all in the
 repository, not in anyone's memory.
 
 Lab: two HP EliteDesk 800 G6 minis (pve-01, pve-02) on Proxmox VE 9.2 and
-1 GbE, sharing a 1 TB LIO fileio iSCSI LUN at io_timeout 10. wdmd runs on
+10 GbE, sharing a 1 TB LIO fileio iSCSI LUN at io_timeout 10. wdmd runs on
 softdog because the iTCO watchdog on these boxes never fires. The chaos
 suite expects to be the only user of the lab and will crash nodes.
 
