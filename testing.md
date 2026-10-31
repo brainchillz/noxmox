@@ -6,9 +6,13 @@ the lab, the pass criteria and the latest measured results are all in the
 repository, not in anyone's memory.
 
 Lab: two HP EliteDesk 800 G6 minis (pve-01, pve-02) on Proxmox VE 9.2 and
-10 GbE, sharing a 1 TB LIO fileio iSCSI LUN at io_timeout 10. wdmd runs on
-softdog because the iTCO watchdog on these boxes never fires. The chaos
-suite expects to be the only user of the lab and will crash nodes.
+10 GbE, sharing two LIO iSCSI LUNs from the same target host at io_timeout
+10. The pool itself lives on a 1 TB fileio LUN (a file on a ZFS dataset,
+no SCSI-3 PR enforcement). A second, 64 GiB sparse zvol LUN exported as an
+iblock backstore exists only for the PR self-test, because iblock on a zvol
+does enforce PR and fileio does not. wdmd runs on softdog because the iTCO
+watchdog on these boxes never fires. The chaos suite expects to be the only
+user of the lab and will crash nodes.
 
 Three layers of testing, each catching a different class of failure:
 
@@ -219,9 +223,10 @@ scenario that takes the whole lab down), or `test/chaos/run.sh <name>`.
   preempts node B's key; both write again.
 - **Must hold:** both write while registered; after preemption A still
   writes and B's write is rejected by the array.
-- **Result:** pass on a zvol-backed scratch LUN on the lab target. The
-  pool's own fileio LUN does not enforce PR, which is exactly what this
-  test exists to detect. The PR layer is integrated into the daemon and
+- **Result:** pass on the 64 GiB zvol/iblock scratch LUN described above
+  (`pr-selftest.sh` matches it by the `noxpr` substring in its by-path
+  name). The pool's own fileio LUN does not enforce PR, which is exactly
+  what this test exists to detect. The PR layer is integrated into the daemon and
   off by default: `nox pr-enable` and `nox pr-reserve` turn it on, every
   node then registers its key on start, and a survivor taking over from a
   dead host preempts that host's key. The chaos scenarios above all ran
