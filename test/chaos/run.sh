@@ -7,7 +7,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib.sh"
 
 DEFAULT="standalone-refusal noxd-kill noxd-kill-create concurrent-create-delete delete-vs-activate migrate-abort clock-skew hard-reset sanlock-freeze path-loss-holder"
-ALL="$DEFAULT path-loss-both"
+ALL="$DEFAULT path-loss-both path-loss-idle"
 case "${1:-}" in
     "") set -- $DEFAULT ;;
     all) set -- $ALL ;;

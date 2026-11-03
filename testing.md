@@ -151,6 +151,44 @@ scenario that takes the whole lab down), or `test/chaos/run.sh <name>`.
   data intact, three passes. One pass carried the stuck-orphans warning;
   the reaper and healthcheck fixes of 2026-10-29 address that.
 
+### iSCSI target gone for everyone, nothing held (`path-loss-idle`)
+
+- **Failure:** the shared LUN disappears from every node for longer than
+  sanlock's fail timeout (8 x io_timeout) while no guest runs on the pool,
+  then returns. The lab hit this with a storage-server reboot.
+- **How:** guest stopped; `targetcli /iscsi/<iqn>/tpg1 disable` on the
+  storage server for 100 s, then enable.
+- **Must hold:** no node fences (nothing holds a lease, nothing to kill);
+  within 60 s of the target returning every daemon reports `ready true`
+  again without a restart, `nox_lockspace_lost_total` is 1 on each,
+  `nox create` and `nox delete` work from both nodes and `nox check` is
+  clean. A daemon still answering `rv -28` is the bug this scenario
+  guards: sanlock drops the lockspace, tells no one, and the daemon sat
+  with `ready true` and no lockspace until restarted.
+- **Measured:** not yet run. A quicker stand-in for a lab check is
+  `sanlock client rem_lockspace -s <lockspace>:<host id>:<device>:1048576`
+  under an idle daemon, which drops the lockspace without any I/O outage;
+  the watcher should log the loss and "joined lockspace" within 15 s.
+
+### Lease record left by this host's past generation (`nox check` / `nox repair`)
+
+- **Failure:** a volume refuses `delete` or `activate` with "in use by host
+  N" where N is the node itself, which holds nothing. Seen on the lab after
+  the storage-server reboot: two volumes of a deleted guest carried lease
+  records owned by host 2 at generation 3 while host 2 was at generation 2
+  (a `set-io-timeout` rewrite had restarted the counters), and sanlock on
+  both nodes counted them live.
+- **How:** not scripted. Reproduce by holding a volume, dropping the
+  lockspace administratively so the release is never written, rejoining,
+  and deleting the volume; or by `set-io-timeout` on a build before the
+  rewrite cleared the records.
+- **Must hold:** `nox check` names the slot as a record of this host's past
+  generation; `nox delete` of it succeeds on the first try (the daemon
+  clears the record and retries); `nox repair` clears any it finds; after a
+  `set-io-timeout` no record from before the rewrite remains.
+- **Measured:** the lab case above, cleared by the daemon's delete path
+  after the fix was deployed.
+
 ## Lease arbitration and races between nodes
 
 ### Two nodes outside any cluster (`standalone-refusal`)

@@ -37,6 +37,10 @@ func OpenDevice(path string) (*Device, error) {
 	return &Device{f: f, Path: path, Size: sz}, nil
 }
 
+// Fd is the open handle's descriptor (the daemon resolves it to the node the
+// LUN is reachable on when its by-id link has gone).
+func (d *Device) Fd() uintptr { return d.f.Fd() }
+
 // Close releases the handle.
 func (d *Device) Close() error { return d.f.Close() }
 

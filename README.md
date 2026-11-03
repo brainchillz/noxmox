@@ -170,6 +170,29 @@ on their own.
   gone before a survivor acquires. The chaos suite exercises both outcomes.
   A shorter iSCSI `replacement_timeout` makes the gentle path (guest killed,
   host stays up) win over the watchdog reset more often.
+- Losing the storage path while nothing is held is not fenced at all:
+  sanlock drops the lockspace and, with no lease-holding process to kill,
+  tells nobody. noxd watches for that (`inq_lockspace` every 5 s) and, once
+  the device answers again, rejoins in place with a fresh host generation
+  and takes the leases of any dm device that survived again; `nox status`
+  shows `ready false` in between and `nox_lockspace_lost_total` counts it.
+  If the LUN came back without its by-id link (udev drops the links while a
+  disk is offline and does not always restore them), the rejoin uses the
+  node the pool is still open on, after checking it carries the pool's
+  uuid. Before this watcher such a daemon kept reporting ready while every
+  operation failed with `sanlock acquire: rv -28` until it was restarted.
+- A lease record this host left behind in an earlier generation (a lease
+  held when the lockspace was lost, whose release was never written; or any
+  record from before a `set-io-timeout` rewrite, which restarts the
+  generation counters so the record can read as newer than its owner and
+  sanlock counts it live from every host while this host is up) is
+  recognised by its owner being this host id with a generation other than
+  the current one. Nothing can be using it: this host's leases only exist
+  through this daemon, and everything sanlock still tracks carries the
+  current generation. Delete, activate, resize and the metadata and mailbox
+  leases clear such a record and retry once; `nox check` reports them and
+  `nox repair` clears them; `set-io-timeout` now clears every lease record
+  together with the lockspace so none outlives the reset.
 - Fencing is wdmd on a kernel watchdog device. On the lab's HP EliteDesk
   800 G6 the iTCO timer loads but never resets the machine (tested by
   opening it and not petting it for four minutes), so wdmd uses softdog
@@ -330,7 +353,9 @@ hand; `nox fence --pool NAME --dry-run` reports what it would stop.
   restart-looping. Set the iSCSI nodes to automatic startup and, after such
   an outage, re-login the target (`iscsiadm -m node -T <iqn> --logout` then
   `--login`) or reboot. Enforced-PR and multipath both need the session
-  healthy.
+  healthy. A LUN that stays attached through the outage can come back
+  without its `/dev/disk/by-id` link; `udevadm trigger --action=change
+  /sys/block/<disk>` puts it back (the daemon copes meanwhile, see above).
 - Multipath is untested. The timeout rule above applies to `no_path_retry`
   as well: it must give up before sanlock does.
 

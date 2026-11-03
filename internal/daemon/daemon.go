@@ -57,9 +57,10 @@ type held struct {
 }
 
 type stats struct {
-	activations uint64
-	mailHandled uint64
-	lastHandoff time.Duration
+	activations   uint64
+	mailHandled   uint64
+	lastHandoff   time.Duration
+	lockspaceLost uint64 // times sanlock dropped the lockspace under us and we rejoined in place
 }
 
 // Daemon state.
@@ -78,6 +79,7 @@ type Daemon struct {
 	stats    stats
 	pr       *scsipr.Dev // non-nil when the pool is in PR mode on this node
 	ready    atomic.Bool
+	bg       sync.Once // the background loops start once, on the first join; later joins (io_timeout change, lockspace loss) reuse them
 	lg       *log.Logger
 }
 
@@ -197,11 +199,108 @@ func (d *Daemon) join() {
 	}
 	d.adopt()
 	d.ready.Store(true)
-	go d.events()
-	go d.mailbox()
-	go d.upgrader()
-	go d.reaper()
-	go d.healthcheck()
+	d.bg.Do(func() {
+		go d.events()
+		go d.mailbox()
+		go d.upgrader()
+		go d.reaper()
+		go d.healthcheck()
+		go d.lockspaceWatch()
+	})
+}
+
+// lockspaceWatch notices when sanlock has dropped the lockspace under the
+// daemon. sanlock removes a lockspace whose delta lease it could not renew
+// for the fail timeout (8 x io_timeout). If a process held leases in it the
+// killpath (nox fence) runs and the signal handler takes it from there; a
+// daemon holding nothing is simply left out, and sanlock has no reason to
+// tell it. Left alone, such a daemon keeps reporting ready while every
+// acquire fails with ENOSPC (rv -28, sanlock's answer for a lockspace it does
+// not have) and never rejoins: that is what a two-minute target reboot with
+// no guest running left behind on a lab, and what this repairs. Lost with
+// nothing held, the daemon rejoins in place once the device answers again:
+// the leases went with the lockspace, so held is cleared and adopt takes the
+// leases of any dm device that survived again. Lost while a guest holds a
+// volume, the fence path owns the host; the daemon only stops answering
+// ready until that is over.
+func (d *Daemon) lockspaceWatch() {
+	misses := 0
+	for {
+		time.Sleep(5 * time.Second)
+		if !d.ready.Load() {
+			misses = 0
+			continue
+		}
+		joined, err := sanlock.InqLockspace(d.ls)
+		if err != nil {
+			d.lg.Printf("inq_lockspace: %v", err)
+			continue
+		}
+		if joined {
+			misses = 0
+			continue
+		}
+		if misses++; misses < 2 {
+			continue
+		}
+		misses = 0
+		d.ready.Store(false)
+		d.mu.Lock()
+		d.stats.lockspaceLost++
+		d.mu.Unlock()
+		warned := false
+		for {
+			devs, _ := fence.Devices(d.cfg.Pool)
+			h := fence.Holders(devs)
+			if len(h) == 0 && !fence.InProgress(d.cfg.Pool, 2*time.Minute) {
+				break
+			}
+			if !warned {
+				d.lg.Printf("lockspace %s lost while %d process(es) hold a pool volume; the fence path owns this host until they are gone", d.ls.Name, len(h))
+				warned = true
+			}
+			time.Sleep(5 * time.Second)
+		}
+		d.mu.Lock()
+		dropped := len(d.held)
+		d.held = map[string]*held{}
+		d.ls.Path = d.lockspacePath()
+		d.mu.Unlock()
+		d.lg.Printf("lockspace %s lost: sanlock dropped it (no renewal for %d s) and nothing on this host holds a pool volume; rejoining", d.ls.Name, 8*d.ioTimeout())
+		if dropped > 0 {
+			d.lg.Printf("%d lease(s) went with the lockspace; their dm devices stay and the leases are taken again after the rejoin", dropped)
+		}
+		d.join()
+	}
+}
+
+// lockspacePath is the path to join the lockspace on: the configured device,
+// or, when that link has gone while the pool stayed open (udev drops a LUN's
+// by-id links while it is offline and does not always put them back), the
+// node the open handle points at, provided it still carries this pool's
+// superblock.
+func (d *Daemon) lockspacePath() string {
+	if _, err := os.Stat(d.cfg.Device); err == nil {
+		return d.cfg.Device
+	}
+	p, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", d.pool.Dev.Fd()))
+	if err != nil {
+		d.lg.Printf("%s is gone and the open handle does not resolve (%v); joining on the configured path", d.cfg.Device, err)
+		return d.cfg.Device
+	}
+	fresh, err := store.OpenDevice(p)
+	if err != nil {
+		d.lg.Printf("%s is gone and %s does not open (%v); joining on the configured path", d.cfg.Device, p, err)
+		return d.cfg.Device
+	}
+	q, err := store.Open(fresh)
+	fresh.Close()
+	if err != nil || q.Super.UUIDString() != d.pool.Super.UUIDString() {
+		d.lg.Printf("%s is gone and %s does not carry this pool; joining on the configured path", d.cfg.Device, p)
+		return d.cfg.Device
+	}
+	d.lg.Printf("%s is gone (udev drops a LUN's by-id links while it is offline); the pool is still open on %s with the same uuid, joining the lockspace there. udevadm trigger --action=change on the disk restores the link", d.cfg.Device, p)
+	return p
 }
 
 func (d *Daemon) mboxRes() sanlock.Resource {
@@ -213,10 +312,17 @@ func (d *Daemon) mboxRes() sanlock.Resource {
 func (d *Daemon) withMbox(fn func() error) error {
 	r := d.mboxRes()
 	deadline := time.Now().Add(10 * time.Second)
+	cleared := false
 	for {
 		err := sanlock.Acquire(d.sock, r, sanlock.Exclusive, false)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, sanlock.ErrHeld) && !cleared {
+			cleared = true
+			if d.clearStaleOwn(r, "mailbox lease") {
+				continue
+			}
 		}
 		if (!errors.Is(err, sanlock.ErrHeld) && !errors.Is(err, sanlock.ErrAgain)) || time.Now().After(deadline) {
 			return fmt.Errorf("mailbox lease: %w", err)
@@ -297,6 +403,55 @@ func (d *Daemon) res(slot uint32) sanlock.Resource {
 
 func (d *Daemon) metaRes() sanlock.Resource {
 	return sanlock.Resource{Lockspace: d.ls.Name, Name: "meta", Path: d.cfg.Device, Offset: d.pool.Super.MetaLeaseOff}
+}
+
+// myGeneration is this host's current generation in the lockspace, 0 when
+// it cannot be read.
+func (d *Daemon) myGeneration() uint64 {
+	hs, err := sanlock.Hosts(d.ls.Name, d.cfg.HostID)
+	if err != nil || len(hs) == 0 {
+		return 0
+	}
+	return hs[0].Generation
+}
+
+// staleOwn reports whether the lease record at r was left by a past
+// generation of this very host: its only owner is our host id with a
+// generation other than our current one. Nothing can be using such a
+// record. A lease of this host is only ever taken through this daemon and
+// its sanlock, and every lease sanlock still tracks (held or orphan) carries
+// the current generation. Two things leave one behind: a lease held at the
+// moment the lockspace was lost, whose release could never be written, and
+// a lockspace rewrite (set-io-timeout restarts the generation counters, so
+// the record's generation can even exceed ours; sanlock then counts it as
+// live for as long as this host is up, from every host). The caller has
+// already checked that the volume is not in held.
+func (d *Daemon) staleOwn(r sanlock.Resource) (recGen, myGen uint64, stale bool) {
+	owners, _, err := sanlock.Owners(r)
+	if err != nil || len(owners) != 1 || owners[0].HostID != d.cfg.HostID {
+		return 0, 0, false
+	}
+	myGen = d.myGeneration()
+	if myGen == 0 || owners[0].Generation == myGen {
+		return owners[0].Generation, myGen, false
+	}
+	return owners[0].Generation, myGen, true
+}
+
+// clearStaleOwn re-initialises the lease record at r when staleOwn says it
+// is ours from a past generation, and reports whether it did. Callers retry
+// their acquire once after a clear.
+func (d *Daemon) clearStaleOwn(r sanlock.Resource, what string) bool {
+	recGen, myGen, stale := d.staleOwn(r)
+	if !stale {
+		return false
+	}
+	if err := sanlock.WriteResource(r); err != nil {
+		d.lg.Printf("%s: lease record left by this host's generation %d (now %d) could not be cleared: %v", what, recGen, myGen, err)
+		return false
+	}
+	d.lg.Printf("%s: cleared the lease record left by this host's generation %d (now %d); nothing held it", what, recGen, myGen)
+	return true
 }
 
 // adopt re-attaches leases for volumes whose dm devices survived a daemon
@@ -569,10 +724,17 @@ func (d *Daemon) upgrader() {
 func (d *Daemon) withMeta(fn func(t *store.Table) error) error {
 	r := d.metaRes()
 	deadline := time.Now().Add(20 * time.Second)
+	cleared := false
 	for {
 		err := sanlock.Acquire(d.sock, r, sanlock.Exclusive, false)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, sanlock.ErrHeld) && !cleared {
+			cleared = true
+			if d.clearStaleOwn(r, "metadata lease") {
+				continue
+			}
 		}
 		if (!errors.Is(err, sanlock.ErrHeld) && !errors.Is(err, sanlock.ErrAgain)) || time.Now().After(deadline) {
 			return fmt.Errorf("metadata lease: %w", err)
@@ -722,13 +884,14 @@ func (d *Daemon) metricsText() string {
 			ex++
 		}
 	}
-	act, mail, hand := d.stats.activations, d.stats.mailHandled, d.stats.lastHandoff
+	act, mail, hand, lost := d.stats.activations, d.stats.mailHandled, d.stats.lastHandoff, d.stats.lockspaceLost
 	d.mu.Unlock()
 	fmt.Fprintf(&b, "# HELP nox_leases_held leases this host holds\n# TYPE nox_leases_held gauge\n")
 	fmt.Fprintf(&b, "nox_leases_held{pool=%q,mode=\"ex\"} %d\nnox_leases_held{pool=%q,mode=\"sh\"} %d\nnox_leases_held{pool=%q,mode=\"backing\"} %d\n", d.cfg.Pool, ex, d.cfg.Pool, sh, d.cfg.Pool, back)
 	g("nox_activations_total", "volume activations since start", "counter", pl, act)
 	g("nox_share_requests_handled_total", "convert-to-shared requests from peers handled", "counter", pl, mail)
 	g("nox_last_handoff_seconds", "duration of the last shared lease wait", "gauge", pl, hand.Seconds())
+	g("nox_lockspace_lost_total", "times sanlock dropped the lockspace under the daemon and it rejoined in place", "counter", pl, lost)
 	if d.ready.Load() {
 		if hosts, err := sanlock.Hosts(d.ls.Name, 0); err == nil {
 			live, dead := 0, 0
@@ -917,7 +1080,11 @@ func (d *Daemon) rename(name, newName string, resp proto.Response) error {
 		}
 		if !isHeld {
 			r := d.res(v.Slot)
-			if err := sanlock.Acquire(d.sock, r, sanlock.Exclusive, false); err != nil {
+			err := sanlock.Acquire(d.sock, r, sanlock.Exclusive, false)
+			if errors.Is(err, sanlock.ErrHeld) && d.clearStaleOwn(r, name) {
+				err = sanlock.Acquire(d.sock, r, sanlock.Exclusive, false)
+			}
+			if err != nil {
 				return fmt.Errorf("volume in use elsewhere: %w", err)
 			}
 			defer func() { _ = sanlock.Release(d.sock, r) }()
@@ -1010,7 +1177,11 @@ func (d *Daemon) delete(name string, reparent bool) error {
 	}
 	r := d.res(v.Slot)
 	// Taking the volume lease exclusively proves no host is using it.
-	if err := sanlock.Acquire(d.sock, r, sanlock.Exclusive, false); err != nil {
+	err = sanlock.Acquire(d.sock, r, sanlock.Exclusive, false)
+	if errors.Is(err, sanlock.ErrHeld) && d.clearStaleOwn(r, name) {
+		err = sanlock.Acquire(d.sock, r, sanlock.Exclusive, false)
+	}
+	if err != nil {
 		if errors.Is(err, sanlock.ErrHeld) {
 			if owners, _, oerr := sanlock.Owners(r); oerr == nil && len(owners) > 0 {
 				return fmt.Errorf("%s is in use by host %d", name, owners[0].HostID)
@@ -1113,6 +1284,7 @@ func (d *Daemon) activate(req proto.Request, resp proto.Response) error {
 	}
 	// The lease wait runs without the daemon lock so status, list and
 	// unrelated activations keep working during a migration handoff.
+	cleared := false
 	for {
 		err = sanlock.Acquire(d.sock, r, mode, true)
 		if err == nil {
@@ -1120,6 +1292,12 @@ func (d *Daemon) activate(req proto.Request, resp proto.Response) error {
 		}
 		if !errors.Is(err, sanlock.ErrHeld) && !errors.Is(err, sanlock.ErrAgain) {
 			return err
+		}
+		if errors.Is(err, sanlock.ErrHeld) && !cleared {
+			cleared = true
+			if d.clearStaleOwn(r, req.Name) {
+				continue
+			}
 		}
 		if mode == sanlock.Shared && time.Since(lastAsk) > 15*time.Second {
 			d.askShare(v, asked)
@@ -1470,12 +1648,24 @@ func (d *Daemon) check(full bool, resp proto.Response) error {
 		}
 		return out, shared
 	}
+	d.mu.Lock()
+	heldHere := map[string]bool{}
+	for n := range d.held {
+		heldHere[n] = true
+	}
+	d.mu.Unlock()
 	vols := []map[string]any{}
 	for _, v := range t.Active() {
 		hs, shared := owners(v.Slot)
 		m := map[string]any{"name": v.Name, "slot": v.Slot, "holders": hs, "shared": shared}
 		if len(hs) > 1 && !shared {
 			problems = append(problems, fmt.Sprintf("slot %d: %s has %d exclusive holders", v.Slot, v.Name, len(hs)))
+		}
+		if !heldHere[v.Name] {
+			if recGen, myGen, stale := d.staleOwn(d.res(v.Slot)); stale {
+				m["stale_own_generation"] = recGen
+				problems = append(problems, fmt.Sprintf("slot %d: %s: lease record left by this host's generation %d (now %d), nothing holds it; nox repair clears it", v.Slot, v.Name, recGen, myGen))
+			}
 		}
 		vols = append(vols, m)
 	}
@@ -1488,7 +1678,11 @@ func (d *Daemon) check(full bool, resp proto.Response) error {
 			}
 			if hs, _ := owners(slot); len(hs) > 0 {
 				orphans = append(orphans, map[string]any{"slot": slot, "holders": hs})
-				problems = append(problems, fmt.Sprintf("slot %d: free but lease held by %v", slot, hs))
+				if recGen, myGen, stale := d.staleOwn(d.res(slot)); stale {
+					problems = append(problems, fmt.Sprintf("slot %d: free, lease record left by this host's generation %d (now %d); nox repair clears it", slot, recGen, myGen))
+				} else {
+					problems = append(problems, fmt.Sprintf("slot %d: free but lease held by %v", slot, hs))
+				}
 			}
 		}
 		resp["orphans"] = orphans
@@ -1530,6 +1724,20 @@ func (d *Daemon) repair(resp proto.Response) error {
 				actions = append(actions, fmt.Sprintf("%s: removed stale device with no record", n))
 			} else {
 				actions = append(actions, fmt.Sprintf("%s: stale device still open, left alone", n))
+			}
+		}
+		for slot := uint32(0); slot < d.pool.Super.Slots; slot++ {
+			if v := t.Vols[slot]; v != nil {
+				if _, ok := d.held[v.Name]; ok {
+					continue
+				}
+			}
+			if recGen, myGen, stale := d.staleOwn(d.res(slot)); stale {
+				if err := sanlock.WriteResource(d.res(slot)); err != nil {
+					actions = append(actions, fmt.Sprintf("slot %d: lease record of this host's generation %d (now %d) not cleared: %v", slot, recGen, myGen, err))
+				} else {
+					actions = append(actions, fmt.Sprintf("slot %d: cleared the lease record left by this host's generation %d (now %d)", slot, recGen, myGen))
+				}
 			}
 		}
 		fixed, err := d.pool.RepairCopies()
@@ -1581,6 +1789,24 @@ func (d *Daemon) setIOTimeout(n int, resp proto.Response) error {
 	if err := sanlock.WriteLockspace(d.ls, 0, n); err != nil {
 		return fmt.Errorf("rewrite lockspace: %w", err)
 	}
+	// The rewrite restarts every host's generation counter. A lease record
+	// from before it would then carry a generation newer than its owner's
+	// and read as live for as long as that host is up, from every host. No
+	// host is live and nothing is held, so every record is free: clear them.
+	for slot := uint32(0); slot < d.pool.Super.Slots; slot++ {
+		if err := sanlock.WriteResource(d.res(slot)); err != nil {
+			return fmt.Errorf("clear lease of slot %d: %w", slot, err)
+		}
+	}
+	for _, r := range []sanlock.Resource{d.metaRes(), d.mboxRes()} {
+		if r.Offset == 0 {
+			continue
+		}
+		if err := sanlock.WriteResource(r); err != nil {
+			return fmt.Errorf("clear %s lease: %w", r.Name, err)
+		}
+	}
+	d.lg.Printf("lockspace rewritten: every lease record cleared with it")
 	ns := *d.pool.Super
 	ns.IOTimeout = uint32(n)
 	if err := d.pool.WriteSuper(&ns); err != nil {
